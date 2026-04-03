@@ -105,6 +105,7 @@ private:
     Csm::csmFloat32 _userTimeSeconds; ///< デルタ時間の積算値[秒]
     Csm::CubismModelSettingJson* _modelJson; ///< モデルセッティング情報
     Csm::csmVector<Csm::CubismIdHandle> _eyeBlinkIds; ///< モデルに設定されたまばたき機能用パラメータID
+    Csm::csmVector<Csm::CubismIdHandle> _lipSyncIds;  ///< リップシンク用パラメータID
     Csm::csmMap<Csm::csmString, Csm::ACubismMotion*> _motions; ///< 読み込まれているモーションのリスト
     Csm::csmMap<Csm::csmString, Csm::ACubismMotion*> _expressions; ///< 読み込まれている表情のリスト
 

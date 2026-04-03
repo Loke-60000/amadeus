@@ -53,22 +53,6 @@ float hash(vec2 p) {
 }
 float hash1(float n) { return fract(sin(n) * 43758.5453123); }
 
-// ── "The choice of Steins;Gate" → 200 bits ───────────────────
-const int kBits = 200;
-const int kPhrase[25] = int[25](
-    0x54,0x68,0x65,0x20,0x63,
-    0x68,0x6F,0x69,0x63,0x65,
-    0x20,0x6F,0x66,0x20,0x53,
-    0x74,0x65,0x69,0x6E,0x73,
-    0x3B,0x47,0x61,0x74,0x65
-);
-float phraseBit(float rawPos) {
-    int p   = int(mod(rawPos, float(kBits)));
-    int b   = p / 8;
-    int bit = 7 - (p - b * 8);
-    return float((kPhrase[b] >> bit) & 1);
-}
-
 // ── blocky digit ─────────────────────────────────────────────
 float drawDigit(vec2 uv, float val) {
     if (uv.x < 0.15 || uv.x > 0.85 || uv.y < 0.08 || uv.y > 0.92) return 0.0;
@@ -84,32 +68,110 @@ float drawDigit(vec2 uv, float val) {
     return d;
 }
 
-// ── binary layer ─────────────────────────────────────────────
-// depthScale: 0=far(dim,small,fast), 1=near(brighter,large,slow)
-vec3 renderBinaryLayer(vec2 uv, float scale, float speedBase,
-                        float alphaBase, float seed) {
-    vec2 scaledUV = uv * scale;
-    vec2 gridId   = floor(scaledUV);
+// ── scrolling binary-chunk layer ──────────────────────────────
+// Space is divided into 10×10-unit slots. Each slot may contain
+// one rectangular chunk (width 1–10, height 1–10 base units)
+// filled with scrolling binary digits. Slot-rows scroll at
+// independent speeds.
+vec3 renderBlockLayer(vec2 uv, float scale, float speedBase,
+                      float alphaBase, float seed) {
+    const float slotSize = 10.0;
 
-    float rowSpeed = (hash1(gridId.y + seed) * 0.5 + 0.5) * speedBase;
-    float rowDir   = (hash1(gridId.y + seed + 10.0) > 0.5) ? 1.0 : -1.0;
+    vec2  unitUV = uv * scale;
+    float slotY  = floor(unitUV.y / slotSize);
 
-    vec2 aUV   = scaledUV + vec2(uTime * rowSpeed * rowDir, 0.0);
-    vec2 aId   = floor(aUV);
-    vec2 aFrac = fract(aUV);
+    // Per-column speed: use static x-column so each vertical stream scrolls
+    // independently — breaks the horizontal-band / sheet appearance.
+    float colGroup = floor(unitUV.x / (slotSize * 2.0));
+    float speedKey = slotY * 7.3 + colGroup * 13.1 + seed;
 
-    if (hash(aId + seed * 1.5) > 0.58) return vec3(0.0);
+    float rowSpeed = (hash1(speedKey) * 0.8 + 0.2) * speedBase;
+    float rowDir   = (hash1(speedKey * 1.7 + 1.0) > 0.5) ? 1.0 : -1.0;
 
-    float rawIdx = aId.x + aId.y * 7.0 + seed * 31.0
-                   + floor(uTime * 0.20 + hash(aId) * 8.0);
-    float bitVal = phraseBit(rawIdx);
-    float digit  = drawDigit(aFrac, bitVal);
-    float flick  = hash(aId + floor(uTime * 2.5) * 0.1) * 0.25 + 0.75;
+    float animX  = unitUV.x + uTime * rowSpeed * rowDir;
+    float slotXf = animX / slotSize;
+    vec2  slotId = vec2(floor(slotXf), slotY);
 
-    // Rare bright cell for depth pop — kept subtle
-    float pop = step(0.92, hash(aId + seed * 3.1)) * 0.8 + 1.0;
+    // A small fraction of slots are permanently empty (negative space)
+    if (hash(slotId + seed) < 0.05) return vec3(0.0);
 
-    return vec3(0.06, 0.48, 0.58) * digit * alphaBase * flick * pop;
+    // Per-chunk fade: slow sine with unique phase and speed per slot
+    float fadePhase = hash(slotId + seed + 77.3) * 6.28318;
+    float fadeSpeed = hash1(slotId.x * 6.1 + slotId.y * 3.7 + seed) * 0.25 + 0.05;
+    float chunkFade = smoothstep(0.15, 0.6, sin(uTime * fadeSpeed + fadePhase) * 0.5 + 0.5);
+    if (chunkFade < 0.001) return vec3(0.0);
+
+    // Chunk dimensions: 1–10 units each axis
+    float blockW  = floor(hash(slotId + seed +  3.7) * 9.0 + 1.5);
+    float blockH  = floor(hash(slotId + seed +  8.1) * 9.0 + 1.5);
+
+    // Random placement within slot (never overflows)
+    float offsetX = floor(hash(slotId + seed + 15.3) * (slotSize - blockW + 1.0));
+    float offsetY = floor(hash(slotId + seed + 22.9) * (slotSize - blockH + 1.0));
+
+    float posX = fract(slotXf) * slotSize;
+    float posY = fract(unitUV.y / slotSize) * slotSize;
+
+    // Y bounds (rectangular — jagged edges handled per-row below)
+    if (posY < offsetY || posY >= offsetY + blockH) return vec3(0.0);
+
+    // Jagged per-row width: each row of the chunk has its own random width
+    // giving the non-uniform staircase outline (1..blockW)
+    float rowIdx = floor(posY) - offsetY;
+    float rowW   = floor(hash(vec2(slotId.x * 3.1 + rowIdx, slotId.y * 2.7) + seed * 5.1) * blockW) + 1.0;
+    if (posX < offsetX || posX >= offsetX + rowW) return vec3(0.0);
+
+    vec2 cellId   = vec2(floor(animX), floor(unitUV.y));
+    vec2 cellFrac = vec2(fract(animX),  fract(unitUV.y));
+
+    // Inner zone structure: divide the chunk into 3×3-unit zones.
+    // Each zone is independently "dense" (tiny sub-digits), normal, or dim.
+    float zoneX    = floor((posX - offsetX) / 3.0);
+    float zoneY    = floor((posY - offsetY) / 3.0);
+    float zoneSeed = hash(vec2(zoneX + slotId.x * 5.0, zoneY + slotId.y * 5.0) + seed * 3.0);
+
+    float digit, alphaScale;
+
+    if (zoneSeed > 0.62) {
+        // Dense inner sub-chunk: 2× resolution gives visually smaller digits
+        vec2 mId   = cellId * 2.0 + floor(cellFrac * 2.0);
+        vec2 mFrac = fract(cellFrac * 2.0);
+        float ph   = floor(uTime * 0.4 + hash(mId + seed) * 6.0);
+        digit      = drawDigit(mFrac, step(0.5, hash(mId + seed * 2.0 + ph)));
+        alphaScale = 1.5;
+    } else {
+        // Normal or dim digit
+        float phase = floor(uTime * 0.25 + hash(cellId + seed) * 6.0);
+        digit       = drawDigit(cellFrac, step(0.5, hash(cellId + seed * 2.0 + phase)));
+        alphaScale  = (zoneSeed > 0.28) ? 1.0 : 0.35;
+    }
+
+    float flick = hash(cellId + seed * 3.0 + floor(uTime * 2.0) * 0.1) * 0.25 + 0.75;
+    float pop   = step(0.92, hash(cellId + seed * 4.1)) * 0.6 + 1.0;
+
+    return vec3(0.06, 0.48, 0.58) * digit * alphaBase * alphaScale * flick * pop * chunkFade;
+}
+
+// ── particles ────────────────────────────────────────────────
+vec3 renderParticles(vec2 uv, float aspect) {
+    vec3 col = vec3(0.0);
+    for (int i = 0; i < 12; i++) {
+        float fi = float(i);
+        float ox = hash1(fi * 3.7193);
+        float oy = hash1(fi * 7.1341 + 1.0);
+        float px = ox + 0.030 * sin(uTime * (0.20 + hash1(fi) * 0.15) + fi * 2.4);
+        float py = oy + 0.030 * cos(uTime * (0.17 + hash1(fi + 5.0) * 0.13) + fi * 1.8);
+
+        float pulse = 0.45 + 0.55 * sin(uTime * (0.9 + hash1(fi * 2.3) * 0.6) + fi * 3.14);
+
+        vec2  diff = (uv - vec2(px, py)) * vec2(aspect, 1.0);
+        float d    = length(diff);
+
+        float core = 0.000018 / (d * d + 0.000010);
+        float halo = 0.000180 / (d * d + 0.000350);
+        col += vec3(0.30, 0.90, 1.00) * (core + halo) * pulse;
+    }
+    return col;
 }
 
 // ── grid ─────────────────────────────────────────────────────
@@ -132,31 +194,6 @@ vec3 renderGrid(vec2 uv) {
     return col;
 }
 
-// ── particles ────────────────────────────────────────────────
-// Fixes: aspect-correct distance (rounds), much smaller bloom.
-vec3 renderParticles(vec2 uv, float aspect) {
-    vec3 col = vec3(0.0);
-    for (int i = 0; i < 12; i++) {
-        float fi = float(i);
-        float ox = hash1(fi * 3.7193);
-        float oy = hash1(fi * 7.1341 + 1.0);
-        float px = ox + 0.030 * sin(uTime * (0.20 + hash1(fi) * 0.15) + fi * 2.4);
-        float py = oy + 0.030 * cos(uTime * (0.17 + hash1(fi + 5.0) * 0.13) + fi * 1.8);
-
-        float pulse = 0.45 + 0.55 * sin(uTime * (0.9 + hash1(fi * 2.3) * 0.6) + fi * 3.14);
-
-        // Aspect-corrected → perfectly round
-        vec2 diff = (uv - vec2(px, py)) * vec2(aspect, 1.0);
-        float d   = length(diff);
-
-        // Tight core + narrow halo — no giant blob
-        float core = 0.000018 / (d * d + 0.000010);
-        float halo = 0.000180 / (d * d + 0.000350);
-        col += vec3(0.30, 0.90, 1.00) * (core + halo) * pulse;
-    }
-    return col;
-}
-
 void main() {
     vec2  uv     = vUV;
     float aspect = uResolution.x / uResolution.y;
@@ -165,10 +202,10 @@ void main() {
     // Very dark base — lets the model stand out clearly
     vec3 col = vec3(0.004, 0.014, 0.026);
 
-    // Depth layers: far (dim, dense, fast) → near (brighter, sparse, slow)
-    col += renderBinaryLayer(p, 52.0, 5.0, 0.13, 11.0);  // far
-    col += renderBinaryLayer(p, 24.0, 2.8, 0.22, 22.0);  // mid
-    col += renderBinaryLayer(p, 11.0, 1.2, 0.34, 33.0);  // near
+    // Depth layers: far (dense, fast, dim) → near (sparse, slow, bright)
+    col += renderBlockLayer(p, 120.0, 5.0, 0.13, 11.0);  // far
+    col += renderBlockLayer(p,  70.0, 2.8, 0.22, 22.0);  // mid
+    col += renderBlockLayer(p,  35.0, 1.2, 0.38, 33.0);  // near
 
     col += renderGrid(p);
     col += renderParticles(uv, aspect);

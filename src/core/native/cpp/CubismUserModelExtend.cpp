@@ -11,10 +11,15 @@
 #include <Utils/CubismString.hpp>
 #include <Motion/CubismMotion.hpp>
 #include <Physics/CubismPhysics.hpp>
+#include <Effect/CubismEyeBlink.hpp>
+#include <Effect/CubismBreath.hpp>
 #include <CubismDefaultParameterId.hpp>
 #include <Rendering/OpenGL/CubismRenderer_OpenGLES2.hpp>
 #include <Motion/CubismMotionQueueEntry.hpp>
 #include <Id/CubismIdManager.hpp>
+
+// Lip sync value driven by the Rust TTS voice player
+extern "C" float amadeus_native_lip_sync_value();
 
 #include "LAppPal.hpp"
 #include "LAppDefine.hpp"
@@ -131,6 +136,36 @@ void CubismUserModelExtend::SetupModel()
         buffer = CreateBuffer(path.GetRawString(), &size);
         LoadPhysics(buffer, size);
         DeleteBuffer(buffer, path.GetRawString());
+    }
+
+    // Eye blink — reads the EyeBlink group from the model JSON
+    if (_modelJson->GetEyeBlinkParameterCount() > 0)
+    {
+        _eyeBlink = CubismEyeBlink::Create(_modelJson);
+    }
+
+    // Breath — drives ParamBreath which is a physics input for this model,
+    // and also gently moves the head/body to give life without motion files.
+    {
+        _breath = CubismBreath::Create();
+        csmVector<CubismBreath::BreathParameterData> params;
+        params.PushBack(CubismBreath::BreathParameterData(
+            CubismFramework::GetIdManager()->GetId(ParamAngleX),    0.0f, 15.0f,  6.5345f, 0.5f));
+        params.PushBack(CubismBreath::BreathParameterData(
+            CubismFramework::GetIdManager()->GetId(ParamAngleY),    0.0f,  8.0f,  3.5345f, 0.5f));
+        params.PushBack(CubismBreath::BreathParameterData(
+            CubismFramework::GetIdManager()->GetId(ParamAngleZ),    0.0f, 10.0f,  5.5345f, 0.5f));
+        params.PushBack(CubismBreath::BreathParameterData(
+            CubismFramework::GetIdManager()->GetId(ParamBodyAngleX), 0.0f, 4.0f, 15.5345f, 0.5f));
+        params.PushBack(CubismBreath::BreathParameterData(
+            CubismFramework::GetIdManager()->GetId(ParamBreath),    0.5f,  0.5f,  3.2345f, 0.5f));
+        _breath->SetParameters(params);
+    }
+
+    // Lip sync — collect IDs from the model's LipSync group
+    for (csmInt32 i = 0; i < _modelJson->GetLipSyncParameterCount(); ++i)
+    {
+        _lipSyncIds.PushBack(_modelJson->GetLipSyncParameterId(i));
     }
 
     // モデルに付属するユーザーデータの読み込み
@@ -324,6 +359,18 @@ void CubismUserModelExtend::ModelParamUpdate()
         _expressionManager->UpdateMotion(_model, deltaTimeSeconds);
     }
 
+    // Eye blink (only when no motion is overriding it)
+    if (!motionUpdated && _eyeBlink)
+    {
+        _eyeBlink->UpdateParameters(_model, deltaTimeSeconds);
+    }
+
+    // Breath — drives head/body sway and feeds ParamBreath into physics
+    if (_breath)
+    {
+        _breath->UpdateParameters(_model, deltaTimeSeconds);
+    }
+
     //ドラッグによる変化
     /**
     *ドラッグによる顔の向きの調整
@@ -339,6 +386,15 @@ void CubismUserModelExtend::ModelParamUpdate()
     //ドラッグによる目の向きの調整
     _model->AddParameterValue(_idParamEyeBallX, _dragX); // -1から1の値を加える
     _model->AddParameterValue(_idParamEyeBallY, _dragY);
+
+    // Lip sync — apply TTS voice amplitude to the model's LipSync parameters
+    {
+        const float lipSyncValue = amadeus_native_lip_sync_value();
+        for (csmUint32 i = 0; i < _lipSyncIds.GetSize(); ++i)
+        {
+            _model->AddParameterValue(_lipSyncIds[i], lipSyncValue, 0.8f);
+        }
+    }
 
     // 物理演算の設定
     if (_physics)
