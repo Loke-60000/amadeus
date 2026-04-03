@@ -10,6 +10,8 @@ const LOCAL_RESOURCE_DIR_NAME: &str = "ressource";
 const CUBISM_SDK_DIR_NAME: &str = "CubismSdkForNative-5-r.4.1";
 #[cfg(target_os = "linux")]
 const CUBISM_SDK_DIR_ENV: &str = "AMADEUS_CUBISM_SDK_DIR";
+#[cfg(target_os = "linux")]
+const SKIP_NATIVE_CUBISM_ENV: &str = "AMADEUS_SKIP_NATIVE_CUBISM";
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
@@ -20,6 +22,14 @@ fn main() {
 
 #[cfg(target_os = "linux")]
 fn build_linux_native_cubism() {
+    println!("cargo:rerun-if-env-changed={SKIP_NATIVE_CUBISM_ENV}");
+    if env_flag(SKIP_NATIVE_CUBISM_ENV) {
+        println!(
+            "cargo:warning=Skipping native Cubism build because {SKIP_NATIVE_CUBISM_ENV} is enabled"
+        );
+        return;
+    }
+
     let manifest_dir = PathBuf::from(
         env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR should be available"),
     );
@@ -234,4 +244,16 @@ fn collect_cpp_files(directory: &Path) -> Vec<PathBuf> {
         .collect::<Vec<_>>();
     files.sort();
     files
+}
+
+#[cfg(target_os = "linux")]
+fn env_flag(name: &str) -> bool {
+    env::var(name)
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
 }
