@@ -1,0 +1,41 @@
+[package]
+name = "amadeus-rs"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["cuda"]
+cuda = ["qwen3-tts/cuda"]
+flash-attn = ["cuda", "qwen3-tts/flash-attn"]
+metal = ["qwen3-tts/metal"]
+mkl = ["qwen3-tts/mkl"]
+accelerate = ["qwen3-tts/accelerate"]
+
+[dependencies]
+anyhow = "1.0"
+html2text = "0.12"
+uuid = { version = "1", features = ["v4"] }
+candle-core = "0.9"
+candle-nn = "0.9"
+globset = "0.4.16"
+hound = "3.5"
+libc = "0.2"
+lindera = { version = "2.3.4", features = ["embed-ipadic"] }
+pulldown-cmark = "0.13"
+qwen3-tts = { git = "https://github.com/TrevorS/qwen3-tts-rs", features = ["hub"] }
+regex = "1.12.2"
+reqwest = { version = "0.12.24", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+rodio = "0.20.1"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+tao = "0.35.0"
+thiserror = "1.0.69"
+walkdir = "2.5.0"
+wry = "0.55.0"
+
+[dev-dependencies]
+tempfile = "3.23.0"
+
+[build-dependencies]
+cc = "1.1"
+pkg-config = "0.3"
