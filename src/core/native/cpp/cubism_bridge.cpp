@@ -11,8 +11,8 @@
 #include <string>
 #include <cstdlib>
 
-#include "amadeus_overlay.hpp"
-#include "amadeus_text_renderer.hpp"
+#include "overlay.hpp"
+#include "font_renderer.hpp"
 #include "CubismUserModelExtend.hpp"
 #include "LAppAllocator_Common.hpp"
 #include "LAppDefine.hpp"

@@ -67,10 +67,11 @@ fn build_linux_native_cubism() {
     let cubism_paths = resolve_cubism_paths(&manifest_dir);
     let framework_src = cubism_paths.framework_src.clone();
     let bridge_src = native_cpp_src.join("cubism_bridge.cpp");
-    let overlay_src = native_cpp_src.join("amadeus_overlay.cpp");
-    let overlay_header = native_cpp_src.join("amadeus_overlay.hpp");
-    let text_renderer_src = native_cpp_src.join("amadeus_text_renderer.cpp");
-    let text_renderer_header = native_cpp_src.join("amadeus_text_renderer.hpp");
+    let overlay_src = native_cpp_src.join("overlay.cpp");
+    let overlay_draw_src = native_cpp_src.join("overlay_draw.cpp");
+    let overlay_header = native_cpp_src.join("overlay.hpp");
+    let text_renderer_src = native_cpp_src.join("font_renderer.cpp");
+    let text_renderer_header = native_cpp_src.join("font_renderer.hpp");
     let core_lib = cubism_paths
         .core_root
         .join("lib")
@@ -86,6 +87,7 @@ fn build_linux_native_cubism() {
         &native_cpp_src,
         &bridge_src,
         &overlay_src,
+        &overlay_draw_src,
         &overlay_header,
         &text_renderer_src,
         &text_renderer_header,
@@ -163,6 +165,7 @@ fn build_linux_native_cubism() {
         native_cpp_src.join("CubismUserModelExtend.cpp"),
         native_cpp_src.join("MouseActionManager.cpp"),
         overlay_src,
+        overlay_draw_src,
         text_renderer_src,
         bridge_src,
     ] {

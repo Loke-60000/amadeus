@@ -1,4 +1,4 @@
-#include "amadeus_text_renderer.hpp"
+#include "font_renderer.hpp"
 
 #include <GL/glew.h>
 #include <fontconfig/fontconfig.h>
