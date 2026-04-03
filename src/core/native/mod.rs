@@ -1000,6 +1000,12 @@ mod imp {
             )
         })?;
 
+        let logo_src = manifest_dir.join("assets").join("app").join("logo.png");
+        if logo_src.exists() {
+            std::fs::copy(&logo_src, runtime_dir.join("logo.png"))
+                .context("failed to copy app logo to runtime directory")?;
+        }
+
         Ok(runtime_dir)
     }
 

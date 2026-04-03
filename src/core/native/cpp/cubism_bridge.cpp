@@ -18,6 +18,7 @@
 #include "LAppDefine.hpp"
 #include "LAppPal.hpp"
 #include "MouseActionManager.hpp"
+#include "stb_image.h"
 
 namespace {
 
@@ -452,6 +453,24 @@ void InitializeWindow(const char* window_title)
     if (g_window == nullptr)
     {
         throw std::runtime_error("failed to create the native Cubism window");
+    }
+
+    {
+        Csm::csmSizeInt icon_file_size = 0;
+        Csm::csmByte* icon_file_data = LAppPal::LoadFileAsBytes("logo.png", &icon_file_size);
+        if (icon_file_data != nullptr)
+        {
+            int w, h, channels;
+            unsigned char* pixels = stbi_load_from_memory(
+                icon_file_data, icon_file_size, &w, &h, &channels, STBI_rgb_alpha);
+            LAppPal::ReleaseBytes(icon_file_data);
+            if (pixels != nullptr)
+            {
+                GLFWimage icon{w, h, pixels};
+                glfwSetWindowIcon(g_window, 1, &icon);
+                stbi_image_free(pixels);
+            }
+        }
     }
 
     glfwMakeContextCurrent(g_window);
