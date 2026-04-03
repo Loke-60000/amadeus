@@ -38,8 +38,11 @@ mod imp {
 
     const NATIVE_WINDOW_TITLE: &str = "Amadeus";
     const NATIVE_SESSION_ID: &str = "amadeus-app";
+    const THIRD_PARTY_DIR_NAME: &str = "third_party";
     const LOCAL_RESOURCE_DIR_NAME: &str = "ressource";
+    const CUBISM_FRAMEWORK_DIR_NAME: &str = "CubismNativeFramework";
     const CUBISM_SDK_DIR_NAME: &str = "CubismSdkForNative-5-r.4.1";
+    const CUBISM_FRAMEWORK_DIR_ENV: &str = "AMADEUS_CUBISM_FRAMEWORK_DIR";
     const CUBISM_SDK_DIR_ENV: &str = "AMADEUS_CUBISM_SDK_DIR";
     const NATIVE_LOG_FILE_ENV: &str = "AMADEUS_NATIVE_LOG_FILE";
     const NATIVE_LOG_STDOUT_ENV: &str = "AMADEUS_NATIVE_LOG_STDOUT";
@@ -976,9 +979,7 @@ mod imp {
     fn prepare_shader_runtime(manifest_dir: &Path) -> Result<PathBuf> {
         let runtime_dir = manifest_dir.join("target").join("amadeus-native-runtime");
         let font_source_dir = manifest_dir.join("assets").join(NATIVE_FONT_DIR_NAME);
-        let shader_source_dir = resolve_cubism_sdk_root(manifest_dir)?
-            .join("Framework")
-            .join("src")
+        let shader_source_dir = resolve_cubism_framework_src(manifest_dir)?
             .join("Rendering")
             .join("OpenGL")
             .join("Shaders")
@@ -1002,11 +1003,11 @@ mod imp {
         Ok(runtime_dir)
     }
 
-    fn resolve_cubism_sdk_root(manifest_dir: &Path) -> Result<PathBuf> {
+    fn resolve_cubism_framework_src(manifest_dir: &Path) -> Result<PathBuf> {
         if let Some(override_dir) = env::var_os(CUBISM_SDK_DIR_ENV) {
             let override_dir = normalize_resource_path(manifest_dir, PathBuf::from(override_dir));
             if override_dir.exists() {
-                return Ok(override_dir);
+                return Ok(override_dir.join("Framework").join("src"));
             }
 
             bail!(
@@ -1015,20 +1016,46 @@ mod imp {
             );
         }
 
+        if let Some(override_dir) = env::var_os(CUBISM_FRAMEWORK_DIR_ENV) {
+            let override_dir = normalize_resource_path(manifest_dir, PathBuf::from(override_dir));
+            if override_dir.exists() {
+                return Ok(override_dir);
+            }
+
+            bail!(
+                "{CUBISM_FRAMEWORK_DIR_ENV} points to a missing Cubism Framework directory: {}",
+                override_dir.display()
+            );
+        }
+
+        let tracked_dir = manifest_dir
+            .join(THIRD_PARTY_DIR_NAME)
+            .join(CUBISM_FRAMEWORK_DIR_NAME)
+            .join("src");
+        if tracked_dir.exists() {
+            return Ok(tracked_dir);
+        }
+
         let preferred_dir = manifest_dir
             .join(LOCAL_RESOURCE_DIR_NAME)
-            .join(CUBISM_SDK_DIR_NAME);
+            .join(CUBISM_SDK_DIR_NAME)
+            .join("Framework")
+            .join("src");
         if preferred_dir.exists() {
             return Ok(preferred_dir);
         }
 
-        let legacy_dir = manifest_dir.join(CUBISM_SDK_DIR_NAME);
+        let legacy_dir = manifest_dir
+            .join(CUBISM_SDK_DIR_NAME)
+            .join("Framework")
+            .join("src");
         if legacy_dir.exists() {
             return Ok(legacy_dir);
         }
 
         bail!(
-            "Cubism SDK not found. Expected {} or {}",
+            "Cubism Framework not found. Expected {}, {}, or {}",
+            tracked_dir.display(),
             preferred_dir.display(),
             legacy_dir.display()
         )

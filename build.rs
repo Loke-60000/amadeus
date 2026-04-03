@@ -5,13 +5,27 @@ use std::{
 };
 
 #[cfg(target_os = "linux")]
+const THIRD_PARTY_DIR_NAME: &str = "third_party";
+#[cfg(target_os = "linux")]
+const CUBISM_FRAMEWORK_DIR_NAME: &str = "CubismNativeFramework";
+#[cfg(target_os = "linux")]
 const LOCAL_RESOURCE_DIR_NAME: &str = "ressource";
 #[cfg(target_os = "linux")]
 const CUBISM_SDK_DIR_NAME: &str = "CubismSdkForNative-5-r.4.1";
 #[cfg(target_os = "linux")]
+const CUBISM_FRAMEWORK_DIR_ENV: &str = "AMADEUS_CUBISM_FRAMEWORK_DIR";
+#[cfg(target_os = "linux")]
+const CUBISM_CORE_DIR_ENV: &str = "AMADEUS_CUBISM_CORE_DIR";
+#[cfg(target_os = "linux")]
 const CUBISM_SDK_DIR_ENV: &str = "AMADEUS_CUBISM_SDK_DIR";
 #[cfg(target_os = "linux")]
 const SKIP_NATIVE_CUBISM_ENV: &str = "AMADEUS_SKIP_NATIVE_CUBISM";
+
+#[cfg(target_os = "linux")]
+struct CubismPaths {
+    framework_src: PathBuf,
+    core_root: PathBuf,
+}
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
@@ -23,6 +37,9 @@ fn main() {
 #[cfg(target_os = "linux")]
 fn build_linux_native_cubism() {
     println!("cargo:rerun-if-env-changed={SKIP_NATIVE_CUBISM_ENV}");
+    println!("cargo:rerun-if-env-changed={CUBISM_FRAMEWORK_DIR_ENV}");
+    println!("cargo:rerun-if-env-changed={CUBISM_CORE_DIR_ENV}");
+    println!("cargo:rerun-if-env-changed={CUBISM_SDK_DIR_ENV}");
     if env_flag(SKIP_NATIVE_CUBISM_ENV) {
         println!(
             "cargo:warning=Skipping native Cubism build because {SKIP_NATIVE_CUBISM_ENV} is enabled"
@@ -35,8 +52,10 @@ fn build_linux_native_cubism() {
     );
     let native_root = manifest_dir.join("src").join("core").join("native");
     let native_cpp_src = native_root.join("cpp");
-    println!("cargo:rerun-if-env-changed={CUBISM_SDK_DIR_ENV}");
     println!(
+        "cargo:rerun-if-changed={}",
+        manifest_dir.join(THIRD_PARTY_DIR_NAME).display()
+    );    println!(
         "cargo:rerun-if-changed={}",
         manifest_dir.join(LOCAL_RESOURCE_DIR_NAME).display()
     );
@@ -45,39 +64,24 @@ fn build_linux_native_cubism() {
         manifest_dir.join(CUBISM_SDK_DIR_NAME).display()
     );
 
-    let sdk_root = resolve_cubism_sdk_root(&manifest_dir);
-    let framework_src = sdk_root.join("Framework").join("src");
-    let common_src = sdk_root.join("Samples").join("Common");
-    let sample_linux_src = sdk_root
-        .join("Samples")
-        .join("OpenGL")
-        .join("Demo")
-        .join("proj.linux.cmake")
-        .join("src");
-    let stb_src = sdk_root
-        .join("Samples")
-        .join("OpenGL")
-        .join("thirdParty")
-        .join("stb");
+    let cubism_paths = resolve_cubism_paths(&manifest_dir);
+    let framework_src = cubism_paths.framework_src.clone();
     let bridge_src = native_cpp_src.join("cubism_bridge.cpp");
     let overlay_src = native_cpp_src.join("amadeus_overlay.cpp");
     let overlay_header = native_cpp_src.join("amadeus_overlay.hpp");
     let text_renderer_src = native_cpp_src.join("amadeus_text_renderer.cpp");
     let text_renderer_header = native_cpp_src.join("amadeus_text_renderer.hpp");
-    let core_lib = sdk_root
-        .join("Core")
+    let core_lib = cubism_paths
+        .core_root
         .join("lib")
         .join("linux")
         .join("x86_64")
         .join("libLive2DCubismCore.a");
-    let core_include = sdk_root.join("Core").join("include");
+    let core_include = cubism_paths.core_root.join("include");
 
     for path in [
-        &sdk_root,
         &framework_src,
-        &common_src,
-        &sample_linux_src,
-        &stb_src,
+        &cubism_paths.core_root,
         &native_root,
         &native_cpp_src,
         &bridge_src,
@@ -127,10 +131,7 @@ fn build_linux_native_cubism() {
         .flag_if_supported("-Wno-unused-parameter")
         .include(&native_cpp_src)
         .include(&framework_src)
-        .include(&core_include)
-        .include(&common_src)
-        .include(&sample_linux_src)
-        .include(&stb_src);
+        .include(&core_include);
 
     for include_path in glfw
         .include_paths
@@ -150,17 +151,17 @@ fn build_linux_native_cubism() {
     }
 
     for source_file in [
-        common_src.join("CubismSampleViewMatrix_Common.cpp"),
-        common_src.join("LAppAllocator_Common.cpp"),
-        common_src.join("LAppModel_Common.cpp"),
-        common_src.join("LAppTextureManager_Common.cpp"),
-        common_src.join("MouseActionManager_Common.cpp"),
-        common_src.join("TouchManager_Common.cpp"),
-        sample_linux_src.join("LAppDefine.cpp"),
-        sample_linux_src.join("LAppPal.cpp"),
-        sample_linux_src.join("LAppTextureManager.cpp"),
-        sample_linux_src.join("CubismUserModelExtend.cpp"),
-        sample_linux_src.join("MouseActionManager.cpp"),
+        native_cpp_src.join("CubismSampleViewMatrix_Common.cpp"),
+        native_cpp_src.join("LAppAllocator_Common.cpp"),
+        native_cpp_src.join("LAppModel_Common.cpp"),
+        native_cpp_src.join("LAppTextureManager_Common.cpp"),
+        native_cpp_src.join("MouseActionManager_Common.cpp"),
+        native_cpp_src.join("TouchManager_Common.cpp"),
+        native_cpp_src.join("LAppDefine.cpp"),
+        native_cpp_src.join("LAppPal.cpp"),
+        native_cpp_src.join("LAppTextureManager.cpp"),
+        native_cpp_src.join("CubismUserModelExtend.cpp"),
+        native_cpp_src.join("MouseActionManager.cpp"),
         overlay_src,
         text_renderer_src,
         bridge_src,
@@ -173,36 +174,123 @@ fn build_linux_native_cubism() {
 }
 
 #[cfg(target_os = "linux")]
-fn resolve_cubism_sdk_root(manifest_dir: &Path) -> PathBuf {
+fn resolve_cubism_paths(manifest_dir: &Path) -> CubismPaths {
     if let Some(override_dir) = env::var_os(CUBISM_SDK_DIR_ENV) {
+        let sdk_root = normalize_resource_path(manifest_dir, PathBuf::from(override_dir));
+        if sdk_root.exists() {
+            return CubismPaths {
+                framework_src: sdk_root.join("Framework").join("src"),
+                core_root: sdk_root.join("Core"),
+            };
+        }
+
+        panic!(
+            "{CUBISM_SDK_DIR_ENV} points to a missing Cubism SDK: {}",
+            sdk_root.display()
+        );
+    }
+
+    let framework_src = resolve_cubism_framework_src(manifest_dir);
+    let core_root = resolve_cubism_core_root(manifest_dir, &framework_src);
+    CubismPaths {
+        framework_src,
+        core_root,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn resolve_cubism_framework_src(manifest_dir: &Path) -> PathBuf {
+    if let Some(override_dir) = env::var_os(CUBISM_FRAMEWORK_DIR_ENV) {
         let override_dir = normalize_resource_path(manifest_dir, PathBuf::from(override_dir));
         if override_dir.exists() {
             return override_dir;
         }
 
         panic!(
-            "{CUBISM_SDK_DIR_ENV} points to a missing Cubism SDK: {}",
+            "{CUBISM_FRAMEWORK_DIR_ENV} points to a missing Cubism Framework directory: {}",
             override_dir.display()
         );
     }
 
+    let tracked_dir = manifest_dir
+        .join(THIRD_PARTY_DIR_NAME)
+        .join(CUBISM_FRAMEWORK_DIR_NAME)
+        .join("src");
+    if tracked_dir.exists() {
+        return tracked_dir;
+    }
+
     let preferred_dir = manifest_dir
         .join(LOCAL_RESOURCE_DIR_NAME)
-        .join(CUBISM_SDK_DIR_NAME);
+        .join(CUBISM_SDK_DIR_NAME)
+        .join("Framework")
+        .join("src");
     if preferred_dir.exists() {
         return preferred_dir;
     }
 
-    let legacy_dir = manifest_dir.join(CUBISM_SDK_DIR_NAME);
+    let legacy_dir = manifest_dir
+        .join(CUBISM_SDK_DIR_NAME)
+        .join("Framework")
+        .join("src");
     if legacy_dir.exists() {
         return legacy_dir;
     }
 
     panic!(
-        "Cubism SDK not found. Expected {} or {}",
-        preferred_dir.display(),
-        legacy_dir.display()
+        "Cubism Framework not found. Expected {tracked}, {preferred}, or {legacy}",
+        tracked = tracked_dir.display(),
+        preferred = preferred_dir.display(),
+        legacy = legacy_dir.display()
     );
+}
+
+#[cfg(target_os = "linux")]
+fn resolve_cubism_core_root(manifest_dir: &Path, _adjacent_hint: &Path) -> PathBuf {
+    if let Some(override_dir) = env::var_os(CUBISM_CORE_DIR_ENV) {
+        let override_dir = normalize_resource_path(manifest_dir, PathBuf::from(override_dir));
+        if cubism_core_is_available(&override_dir) {
+            return override_dir;
+        }
+
+        panic!(
+            "{CUBISM_CORE_DIR_ENV} points to a Cubism Core directory missing include/ or lib/: {}",
+            override_dir.display()
+        );
+    }
+
+    let local_core_dir = manifest_dir.join("Core");
+    if cubism_core_is_available(&local_core_dir) {
+        return local_core_dir;
+    }
+
+    let preferred_dir = manifest_dir
+        .join(LOCAL_RESOURCE_DIR_NAME)
+        .join(CUBISM_SDK_DIR_NAME)
+        .join("Core");
+    if cubism_core_is_available(&preferred_dir) {
+        return preferred_dir;
+    }
+
+    let legacy_dir = manifest_dir.join(CUBISM_SDK_DIR_NAME).join("Core");
+    if cubism_core_is_available(&legacy_dir) {
+        return legacy_dir;
+    }
+
+    panic!(
+        "Cubism Core not found. Set {CUBISM_CORE_DIR_ENV} to the private Core directory (the `Core/` directory from the Cubism SDK download)."
+    );
+}
+
+#[cfg(target_os = "linux")]
+fn cubism_core_is_available(core_root: &Path) -> bool {
+    core_root.join("include").is_dir()
+        && core_root
+            .join("lib")
+            .join("linux")
+            .join("x86_64")
+            .join("libLive2DCubismCore.a")
+            .is_file()
 }
 
 #[cfg(target_os = "linux")]
