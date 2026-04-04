@@ -21,13 +21,7 @@ jobs:
       - name: Install Linux system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            libfontconfig1-dev \
-            libfreetype6-dev \
-            libglib2.0-dev \
-            libgtk-3-dev \
-            libsoup-3.0-dev \
-            libwebkit2gtk-4.1-dev
+          sudo apt-get install -y libfontconfig1-dev libfreetype6-dev libglib2.0-dev libgtk-3-dev libsoup-3.0-dev libwebkit2gtk-4.1-dev libasound2-dev
 
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -37,3 +31,6 @@ jobs:
 
       - name: Run tests
         run: cargo test --locked --no-default-features
+
+
+        
