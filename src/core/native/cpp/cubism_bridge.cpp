@@ -11,6 +11,7 @@
 #include <string>
 #include <cstdlib>
 
+#include "boot_sequence.hpp"
 #include "overlay.hpp"
 #include "font_renderer.hpp"
 #include "CubismUserModelExtend.hpp"
@@ -635,6 +636,16 @@ extern "C" int amadeus_cubism_viewer_run(
 
         InitializeFramework();
         InitializeWindow(resolved_window_title);
+
+        {
+            BootSequence boot(g_window, g_window_width, g_window_height);
+            if (!boot.Run())
+            {
+                CleanupAll();
+                return 0;
+            }
+        }
+
         LoadModel(std::filesystem::path(model_json_path));
 
         const int exit_code = RunEventLoop();

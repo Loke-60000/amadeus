@@ -153,6 +153,7 @@ fn build_linux_native_cubism() {
     }
 
     for source_file in [
+        native_cpp_src.join("boot_sequence.cpp"),
         native_cpp_src.join("CubismSampleViewMatrix_Common.cpp"),
         native_cpp_src.join("LAppAllocator_Common.cpp"),
         native_cpp_src.join("LAppModel_Common.cpp"),

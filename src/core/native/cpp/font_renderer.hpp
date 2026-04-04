@@ -13,6 +13,8 @@ public:
     AmadeusTextRenderer& operator=(const AmadeusTextRenderer&) = delete;
 
     bool Initialize(int pixel_size);
+    // Like Initialize but loads a system monospace font instead of the bundled CJK font.
+    bool InitializeMonospace(int pixel_size);
     void Shutdown();
 
     bool IsReady() const;
@@ -26,6 +28,18 @@ public:
         float x,
         float y,
         const std::string& text,
+        float red,
+        float green,
+        float blue,
+        float alpha) const;
+
+    // Like DrawText but advances exactly `cell_width` pixels per codepoint,
+    // producing a uniform character grid regardless of glyph metrics.
+    void DrawTextFixed(
+        float x,
+        float y,
+        const std::string& text,
+        float cell_width,
         float red,
         float green,
         float blue,

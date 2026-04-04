@@ -95,6 +95,9 @@ mod imp {
             .canonicalize()
             .with_context(|| format!("failed to resolve {}", live2d.model_path.display()))?;
 
+        // Expose assets directory so the C++ boot sequence can find frame images
+        unsafe { env::set_var("AMADEUS_ASSETS_DIR", &assets_root); }
+
         let _cwd_guard = CurrentDirGuard::change_to(&runtime_dir)?;
         let model_path = path_to_cstring(&model_path)?;
         let window_title =
@@ -1287,6 +1290,63 @@ mod imp {
                 0
             }
         }
+    }
+
+    /// Plays an audio file at `path` in a background thread and returns its
+    /// duration in milliseconds (or the `fallback_ms` value on any error).
+    /// The caller uses the returned duration to sync frame animation to the audio.
+    #[unsafe(no_mangle)]
+    pub extern "C" fn amadeus_native_boot_audio_play(
+        path: *const c_char,
+        fallback_ms: u32,
+    ) -> u32 {
+        use rodio::Source as _;
+        use std::fs::File;
+        use std::io::BufReader;
+
+        let path_str = if path.is_null() {
+            return fallback_ms;
+        } else {
+            match unsafe { CStr::from_ptr(path) }.to_str() {
+                Ok(s) => s.to_owned(),
+                Err(_) => return fallback_ms,
+            }
+        };
+
+        let file = match File::open(&path_str) {
+            Ok(f) => f,
+            Err(_) => return fallback_ms,
+        };
+
+        let decoder = match rodio::Decoder::new(BufReader::new(file)) {
+            Ok(d) => d,
+            Err(_) => return fallback_ms,
+        };
+
+        let duration_ms: u32 = decoder
+            .total_duration()
+            .map(|d| d.as_millis() as u32)
+            .unwrap_or(fallback_ms);
+
+        // Play on a background thread so the C++ render loop is not blocked
+        thread::spawn(move || {
+            let file2 = match File::open(&path_str) {
+                Ok(f) => f,
+                Err(_) => return,
+            };
+            let decoder2 = match rodio::Decoder::new(BufReader::new(file2)) {
+                Ok(d) => d,
+                Err(_) => return,
+            };
+            if let Ok((_stream, handle)) = OutputStream::try_default() {
+                if let Ok(sink) = Sink::try_new(&handle) {
+                    sink.append(decoder2);
+                    sink.sleep_until_end();
+                }
+            }
+        });
+
+        duration_ms
     }
 
     #[cfg(test)]

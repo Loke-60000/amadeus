@@ -1,3 +1,6 @@
 [submodule "third_party/CubismNativeFramework"]
 	path = third_party/CubismNativeFramework
 	url = https://github.com/Live2D/CubismNativeFramework.git
+[submodule "third_party/llama.cpp"]
+	path = third_party/llama.cpp
+	url = https://github.com/ggml-org/llama.cpp.git

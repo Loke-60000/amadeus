@@ -265,6 +265,80 @@ bool AmadeusTextRenderer::Initialize(int pixel_size) {
     return true;
 }
 
+bool AmadeusTextRenderer::InitializeMonospace(int pixel_size) {
+    Shutdown();
+
+    const std::string mono_path = FindMonospaceFontPath();
+    if (mono_path.empty()) {
+        return false;
+    }
+
+    if (FT_Init_FreeType(&impl_->library) != 0) {
+        return false;
+    }
+
+    if (FT_New_Face(impl_->library, mono_path.c_str(), 0, &impl_->face) != 0) {
+        Shutdown();
+        return false;
+    }
+
+    if (FT_Set_Pixel_Sizes(impl_->face, 0, static_cast<FT_UInt>(pixel_size)) != 0) {
+        Shutdown();
+        return false;
+    }
+
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+
+    // Pre-load ASCII glyphs so char_width is well-defined
+    const auto load_glyph = [this](std::uint32_t codepoint) -> GlyphTexture* {
+        if (!impl_ || impl_->face == nullptr) return nullptr;
+        if (auto it = impl_->glyphs.find(codepoint); it != impl_->glyphs.end())
+            return &it->second;
+
+        GlyphTexture glyph;
+        if (FT_Load_Char(impl_->face, static_cast<FT_ULong>(codepoint), FT_LOAD_RENDER) == 0) {
+            const FT_GlyphSlot slot = impl_->face->glyph;
+            glyph.width     = static_cast<int>(slot->bitmap.width);
+            glyph.height    = static_cast<int>(slot->bitmap.rows);
+            glyph.bearing_x = slot->bitmap_left;
+            glyph.bearing_y = slot->bitmap_top;
+            glyph.advance   = static_cast<int>(slot->advance.x >> 6);
+
+            if (glyph.width > 0 && glyph.height > 0 && slot->bitmap.buffer != nullptr) {
+                glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+                glGenTextures(1, &glyph.texture);
+                glBindTexture(GL_TEXTURE_2D, glyph.texture);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_ALPHA,
+                             glyph.width, glyph.height, 0,
+                             GL_ALPHA, GL_UNSIGNED_BYTE, slot->bitmap.buffer);
+            }
+        }
+
+        const auto [it, _] = impl_->glyphs.emplace(codepoint, glyph);
+        return &it->second;
+    };
+
+    int max_advance = 0;
+    for (unsigned char cp = kAsciiPreloadFirstGlyph; cp <= kAsciiPreloadLastGlyph; ++cp) {
+        if (GlyphTexture* g = load_glyph(cp))
+            max_advance = std::max(max_advance, g->advance);
+    }
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    const int font_height = static_cast<int>(impl_->face->size->metrics.height >> 6);
+    impl_->line_height = std::max(pixel_size + 4, font_height + 2);
+    impl_->baseline    = std::max(pixel_size,
+        static_cast<int>(impl_->face->size->metrics.ascender >> 6));
+    // For a monospace font all glyphs share the same advance; use it directly.
+    impl_->char_width  = max_advance > 0 ? max_advance : (pixel_size / 2 + 1);
+    impl_->ready = true;
+    return true;
+}
+
 void AmadeusTextRenderer::Shutdown() {
     if (!impl_) {
         return;
@@ -476,6 +550,89 @@ void AmadeusTextRenderer::DrawText(
         }
 
         cursor_x += static_cast<float>(glyph != nullptr && glyph->advance > 0 ? glyph->advance : impl_->char_width);
+    }
+
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glDisable(GL_TEXTURE_2D);
+}
+
+void AmadeusTextRenderer::DrawTextFixed(
+    float x,
+    float y,
+    const std::string& text,
+    float cell_width,
+    float red,
+    float green,
+    float blue,
+    float alpha) const
+{
+    if (!impl_ || !impl_->ready || text.empty()) return;
+
+    glEnable(GL_TEXTURE_2D);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+    glColor4f(red, green, blue, alpha);
+
+    const auto load_glyph = [this](std::uint32_t codepoint) -> const GlyphTexture* {
+        if (!impl_ || impl_->face == nullptr) return nullptr;
+        if (auto it = impl_->glyphs.find(codepoint); it != impl_->glyphs.end())
+            return &it->second;
+
+        GlyphTexture glyph;
+        if (FT_Load_Char(impl_->face, static_cast<FT_ULong>(codepoint), FT_LOAD_RENDER) == 0) {
+            const FT_GlyphSlot slot = impl_->face->glyph;
+            glyph.width     = static_cast<int>(slot->bitmap.width);
+            glyph.height    = static_cast<int>(slot->bitmap.rows);
+            glyph.bearing_x = slot->bitmap_left;
+            glyph.bearing_y = slot->bitmap_top;
+            glyph.advance   = static_cast<int>(slot->advance.x >> 6);
+
+            if (glyph.width > 0 && glyph.height > 0 && slot->bitmap.buffer != nullptr) {
+                glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+                glGenTextures(1, &glyph.texture);
+                glBindTexture(GL_TEXTURE_2D, glyph.texture);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_ALPHA,
+                             glyph.width, glyph.height, 0,
+                             GL_ALPHA, GL_UNSIGNED_BYTE, slot->bitmap.buffer);
+            }
+        }
+
+        const auto [it, _] = impl_->glyphs.emplace(codepoint, glyph);
+        return &it->second;
+    };
+
+    float cursor_x = x;
+    const float baseline_y = y + static_cast<float>(impl_->baseline);
+    std::size_t index = 0;
+
+    while (index < text.size()) {
+        std::uint32_t codepoint = 0;
+        if (!DecodeUtf8Codepoint(text, &index, &codepoint)) {
+            cursor_x += cell_width;
+            continue;
+        }
+
+        const GlyphTexture* glyph = load_glyph(codepoint);
+        if (glyph != nullptr && glyph->texture != 0 && glyph->width > 0 && glyph->height > 0) {
+            // Center the glyph bitmap within the cell horizontally
+            const float glyph_w = static_cast<float>(glyph->width);
+            const float glyph_h = static_cast<float>(glyph->height);
+            const float xpos    = cursor_x + (cell_width - glyph_w) * 0.5f;
+            const float ypos    = baseline_y - static_cast<float>(glyph->bearing_y);
+
+            glBindTexture(GL_TEXTURE_2D, glyph->texture);
+            glBegin(GL_QUADS);
+            glTexCoord2f(0.0f, 0.0f); glVertex2f(xpos,          ypos);
+            glTexCoord2f(1.0f, 0.0f); glVertex2f(xpos + glyph_w, ypos);
+            glTexCoord2f(1.0f, 1.0f); glVertex2f(xpos + glyph_w, ypos + glyph_h);
+            glTexCoord2f(0.0f, 1.0f); glVertex2f(xpos,           ypos + glyph_h);
+            glEnd();
+        }
+
+        cursor_x += cell_width;  // always advance by exactly one cell
     }
 
     glBindTexture(GL_TEXTURE_2D, 0);
