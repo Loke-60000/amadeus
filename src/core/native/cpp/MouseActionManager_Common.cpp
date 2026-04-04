@@ -39,20 +39,16 @@ MouseActionManager_Common::MouseActionManager_Common()
 
 MouseActionManager_Common::~MouseActionManager_Common()
 {
-    // 行列データの解放
     delete _viewMatrix;
-
+    delete _deviceToScreen;
     delete _TouchManager;
 }
 
 void MouseActionManager_Common::Initialize(int windowWidth, int windowHeight)
 {
-    // 行列の初期化
     ViewInitialize(windowWidth, windowHeight);
 
-    // タッチ関係のイベント管理
     _TouchManager = new TouchManager_Common();
-
     _captured = false;
     _mouseX = 0.0f;
     _mouseY = 0.0f;
@@ -60,6 +56,9 @@ void MouseActionManager_Common::Initialize(int windowWidth, int windowHeight)
 
 void MouseActionManager_Common::ViewInitialize(int windowWidth, int windowHeight)
 {
+    delete _viewMatrix;
+    delete _deviceToScreen;
+
     _deviceToScreen = new Csm::CubismMatrix44();
     _viewMatrix = new CubismSampleViewMatrix_Common(_deviceToScreen, windowWidth, windowHeight);
 }

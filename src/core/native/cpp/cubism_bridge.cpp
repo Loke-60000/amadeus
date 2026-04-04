@@ -454,6 +454,8 @@ void InitializeFramework()
     g_framework_started = true;
 }
 
+void RenderFrame();  // forward declaration — defined after InitializeWindow
+
 void ConfigureOpenGlState()
 {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
@@ -531,7 +533,19 @@ void InitializeWindow(const char* window_title)
     glfwSetKeyCallback(g_window, OnKeyCallback);
     glfwSetCharCallback(g_window, OnCharCallback);
 
-    glfwGetWindowSize(g_window, &g_window_width, &g_window_height);
+    // Fires on any framebuffer size change — drag resize, maximize, fullscreen
+    // toggle, or display scaling changes. Update GL state immediately and
+    // render a frame so there is no black flash or freeze during the transition.
+    glfwSetFramebufferSizeCallback(g_window, [](GLFWwindow*, int width, int height) {
+        if (width <= 0 || height <= 0) return;
+        g_window_width  = width;
+        g_window_height = height;
+        glViewport(0, 0, width, height);
+        MouseActionManager::GetInstance()->ViewInitialize(width, height);
+        if (g_model) RenderFrame();
+    });
+
+    glfwGetFramebufferSize(g_window, &g_window_width, &g_window_height);
     glViewport(0, 0, g_window_width, g_window_height);
 
     MouseActionManager::GetInstance()->Initialize(g_window_width, g_window_height);
@@ -568,49 +582,46 @@ void LoadModel(const std::filesystem::path& model_json_path)
     MouseActionManager::GetInstance()->SetUserModel(g_model.get());
 }
 
-void UpdateViewportIfNeeded()
+void RenderFrame()
 {
-    int width = 0;
-    int height = 0;
-    glfwGetWindowSize(g_window, &width, &height);
+    LAppPal::UpdateTime();
 
-    if ((g_window_width != width || g_window_height != height) && width > 0 && height > 0)
-    {
-        MouseActionManager::GetInstance()->ViewInitialize(width, height);
-        g_window_width = width;
-        g_window_height = height;
-        glViewport(0, 0, width, height);
-        return;
+    if (g_overlay) {
+        g_overlay->Update();
     }
 
-    glViewport(0, 0, g_window_width, g_window_height);
+    glClearColor(0.01f, 0.03f, 0.05f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glClearDepth(1.0);
+    ConfigureOpenGlState();
+    RenderBackground();
+
+    if (g_model) {
+        g_model->ModelOnUpdate(g_window);
+    }
+    if (g_overlay) {
+        g_overlay->Render(g_text_renderer, g_window_width, g_window_height);
+    }
+
+    glfwSwapBuffers(g_window);
 }
 
 int RunEventLoop()
 {
+    // On Linux/X11 the event loop blocks during window resize, causing a
+    // visible freeze. Registering a window-refresh callback lets GLFW drive
+    // a full render during the resize drag, keeping the content live.
+    glfwSetWindowRefreshCallback(g_window, [](GLFWwindow*) {
+        if (g_model) RenderFrame();
+    });
+
     while (glfwWindowShouldClose(g_window) == GLFW_FALSE)
     {
-        UpdateViewportIfNeeded();
-        LAppPal::UpdateTime();
-        if (g_overlay) {
-            g_overlay->Update();
-        }
-
-        glClearColor(0.01f, 0.03f, 0.05f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-        glClearDepth(1.0);
-        ConfigureOpenGlState();
-        RenderBackground();
-
-        g_model->ModelOnUpdate(g_window);
-        if (g_overlay) {
-            g_overlay->Render(g_text_renderer, g_window_width, g_window_height);
-        }
-
-        glfwSwapBuffers(g_window);
+        RenderFrame();
         glfwPollEvents();
     }
 
+    glfwSetWindowRefreshCallback(g_window, nullptr);
     return 0;
 }
 
