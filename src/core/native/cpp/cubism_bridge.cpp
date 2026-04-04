@@ -579,6 +579,8 @@ void LoadModel(const std::filesystem::path& model_json_path)
         current_model_directory);
     g_model->LoadAssets(model_file_name.c_str());
 
+    // No warm-up — let the eyes open naturally at the slowed idle speed.
+
     MouseActionManager::GetInstance()->SetUserModel(g_model.get());
 }
 

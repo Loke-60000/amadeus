@@ -91,6 +91,11 @@ void LAppPal::UpdateTime()
     s_lastFrame = s_currentFrame;
 }
 
+void LAppPal::SetDeltaTime(csmFloat32 deltaSeconds)
+{
+    s_deltaTime = static_cast<double>(deltaSeconds);
+}
+
 void LAppPal::PrintLog(const csmChar* format, ...)
 {
     va_list args;

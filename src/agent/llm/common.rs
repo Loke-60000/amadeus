@@ -49,7 +49,9 @@ pub trait ModelClient {
         stream: &mut dyn TextStreamSink,
     ) -> Result<ModelTurn> {
         let turn = self.complete(system_prompt, messages, tools)?;
-        if turn.tool_calls.is_empty() && !turn.assistant_text.is_empty() {
+        // Emit text even when tool calls are present — this is the narration
+        // Kurisu speaks before/between tool uses ("let me check that file…").
+        if !turn.assistant_text.is_empty() {
             stream.on_text_delta(&turn.assistant_text)?;
         }
         Ok(turn)

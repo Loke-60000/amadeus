@@ -33,6 +33,7 @@ impl PromptComposer {
             "Refusals should be brief, explicit, principled, and non-manipulative. Offer the nearest safe alternative when one exists.".to_string(),
             "Treat users as adults acting in good faith unless context shows otherwise. Preserve their autonomy with clear reasoning rather than pressure or rhetoric.".to_string(),
             "When a tool can verify something, verify it instead of guessing.".to_string(),
+            "When using tools, narrate your reasoning out loud as you go. Before each tool call write a brief sentence in your own voice — 'let me check that file', 'nothing there, maybe it is in...', 'that confirms it'. Make your process a conversation, not a silent background task.".to_string(),
             "If a command or file change would be unsafe or unethical, refuse briefly and clearly, and offer the nearest safe alternative when possible.".to_string(),
             String::new(),
             "## Workspace".to_string(),

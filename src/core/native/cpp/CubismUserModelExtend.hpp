@@ -42,6 +42,9 @@ public:
     */
     void ModelOnUpdate(GLFWwindow* window);
 
+    // Fast-forward the idle animation so the model starts with eyes open.
+    void WarmUp(float totalSeconds, float stepSeconds);
+
 private:
     /**
     * @brief model3.jsonからモデルを生成する

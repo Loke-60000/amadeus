@@ -51,6 +51,10 @@ public:
 
     static void UpdateTime();
 
+    // Inject a synthetic delta time without touching the wall clock.
+    // Use this to advance animation state during pre-tick / warm-up passes.
+    static void SetDeltaTime(Csm::csmFloat32 deltaSeconds);
+
     /**
     * @brief ログを出力する
     *

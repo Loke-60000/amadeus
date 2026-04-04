@@ -31,6 +31,11 @@ using namespace Live2D::Cubism::Framework;
 using namespace DefaultParameterId;
 using namespace LAppDefine;
 
+// Vertical offset applied after the model's own layout.
+// Positive moves the model up, negative moves it down.
+// Cubism world-space units: the visible range is roughly -1.0 (bottom) to +1.0 (top).
+static constexpr float kModelOffsetY = -0.3f;
+
 CubismUserModelExtend::CubismUserModelExtend(const std::string modelDirectoryName, const std::string _currentModelDirectory)
     : LAppModel_Common()
     , _modelJson(NULL)
@@ -183,6 +188,7 @@ void CubismUserModelExtend::SetupModel()
     _modelJson->GetLayoutMap(layout);
     // レイアウト情報から位置を設定
     _modelMatrix->SetupFromLayout(layout);
+    _modelMatrix->TranslateY(kModelOffsetY);
 
     // パラメータを保存
     _model->SaveParameters();
@@ -320,6 +326,10 @@ Csm::CubismMotionQueueEntryHandle CubismUserModelExtend::StartMotion(const Csm::
     return  _motionManager->StartMotionPriority(motion, autoDelete, priority);
 }
 
+// Controls how fast the idle motion plays back (1.0 = normal, 0.4 = 2.5× slower).
+// Lower values make the eye-open animation at startup feel more gradual.
+static constexpr Csm::csmFloat32 kIdleMotionSpeed = 0.4f;
+
 void CubismUserModelExtend::ModelParamUpdate()
 {
     // 前のフレームとの差分を取得
@@ -346,7 +356,7 @@ void CubismUserModelExtend::ModelParamUpdate()
     else
     {
         // モーションを更新し、パラメータを反映
-        motionUpdated = _motionManager->UpdateMotion(_model, deltaTimeSeconds);
+        motionUpdated = _motionManager->UpdateMotion(_model, deltaTimeSeconds * kIdleMotionSpeed);
     }
 
     // 状態を保存
@@ -486,4 +496,16 @@ void CubismUserModelExtend::ModelOnUpdate(GLFWwindow* window)
 
     // モデルの描画を更新
     Draw(projection); ///< 参照渡しなのでprojectionは変質する
+}
+
+void CubismUserModelExtend::WarmUp(float totalSeconds, float stepSeconds)
+{
+    const int steps = static_cast<int>(totalSeconds / stepSeconds);
+    for (int i = 0; i < steps; ++i)
+    {
+        LAppPal::SetDeltaTime(stepSeconds);
+        ModelParamUpdate();
+    }
+    // Reset so the first real frame gets a proper delta from UpdateTime()
+    LAppPal::SetDeltaTime(0.0f);
 }
