@@ -132,7 +132,9 @@ pub struct ToolCatalog {
     tools: Vec<Box<dyn AgentTool>>,
     by_name: BTreeMap<String, usize>,
     context: ToolContext,
+    #[allow(dead_code)]
     task_registry: TaskRegistry,
+    #[allow(dead_code)]
     planning: PlanningState,
 }
 
@@ -187,10 +189,12 @@ impl ToolCatalog {
         }
     }
 
+    #[allow(dead_code)]
     pub fn task_registry(&self) -> &TaskRegistry {
         &self.task_registry
     }
 
+    #[allow(dead_code)]
     pub fn planning(&self) -> &PlanningState {
         &self.planning
     }
@@ -214,6 +218,7 @@ impl ToolCatalog {
         self.tools[*index].invoke(input, &self.context)
     }
 
+    #[allow(dead_code)]
     pub fn context(&self) -> &ToolContext {
         &self.context
     }

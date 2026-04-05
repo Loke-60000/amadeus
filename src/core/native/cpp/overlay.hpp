@@ -12,6 +12,10 @@ struct GLFWwindow;
 extern "C" void AmadeusOverlayNativeTextDelta(void* user_data, const char* delta);
 extern "C" void AmadeusOverlayNativeStreamEvent(void* user_data, int event_kind, const char* message);
 
+enum class AppMode { Chat, SpeechToSpeech };
+enum class VoiceLang { Auto, English, Japanese };
+enum class VadSensitivity { Low, Medium, High };
+
 class AmadeusOverlay {
 public:
     AmadeusOverlay();
@@ -41,12 +45,28 @@ private:
     struct Snapshot {
         bool agent_enabled = false;
         bool voice_enabled = false;
+        bool stt_enabled = false;
         bool request_in_flight = false;
         bool reveal_active = false;
+        bool settings_open = false;
+        int  settings_row = 0;
+        int  stt_state = 0;
+        int  stt_device_count = 0;
+        int  stt_device_index = 0;
+        int  mic_gain_step = 4;  // index into gain table; 4 = 0 dB
+        int  mic_gate_step = 0;  // 0=Off, 1=Low, 2=Medium, 3=High
+        int  mic_comp_step = 0;  // 0=Off, 1=Light, 2=Medium, 3=Heavy
+        float stt_mic_level = 0.0f;
+        AppMode app_mode = AppMode::Chat;
+        VoiceLang voice_lang = VoiceLang::Auto;
+        VadSensitivity stt_sensitivity = VadSensitivity::Medium;
         std::string status;
         std::string input;
         std::string subtitle;
         std::string visible_reply;
+        std::string runtime_info;
+        std::string stt_device_name;
+        std::string stt_partial_text;
         std::vector<TranscriptEntry> transcript;
     };
 
@@ -110,18 +130,47 @@ private:
         const Snapshot& snapshot,
         int window_width,
         int window_height) const;
+    void DrawSettingsPanel(
+        const AmadeusTextRenderer& text_renderer,
+        const Snapshot& snapshot,
+        int window_width,
+        int window_height) const;
+    void DrawSettingsButton(
+        const AmadeusTextRenderer& text_renderer,
+        int window_width) const;
+    void DrawSttMicIndicator(
+        const AmadeusTextRenderer& text_renderer,
+        const Snapshot& snapshot,
+        int window_width,
+        int window_height) const;
+
+    void ApplySettingsRowChange(int direction);
+    void ApplyModeChange(int direction);
+    void ApplyLangChange(int direction);
+    void ApplySensitivityChange(int direction);
 
     mutable std::mutex mutex_;
     bool agent_enabled_ = false;
     bool voice_enabled_ = false;
+    bool stt_enabled_ = false;
     bool request_in_flight_ = false;
     bool reveal_active_ = false;
+    bool settings_open_ = false;
+    int  settings_row_ = 0;
+    int  stt_device_index_ = 0;
+    int  mic_gain_step_ = 4;  // 0..8, maps to -12..+12 dB in steps of 3
+    int  mic_gate_step_ = 0;  // 0=Off, 1=Low, 2=Medium, 3=High
+    int  mic_comp_step_ = 0;  // 0=Off, 1=Light, 2=Medium, 3=Heavy
+    AppMode app_mode_ = AppMode::Chat;
+    VoiceLang voice_lang_ = VoiceLang::Auto;
+    VadSensitivity stt_sensitivity_ = VadSensitivity::Medium;
     std::uint64_t active_generation_ = 0;
     std::string status_;
     std::string input_;
     std::string subtitle_;
     std::string full_reply_;
     std::string visible_reply_;
+    std::string runtime_info_;
     std::size_t speech_cursor_ = 0;
     bool reply_pending_commit_ = false;
     double reveal_budget_seconds_ = 0.0;

@@ -193,6 +193,7 @@ pub struct AgentSession {
     pub messages: Vec<SessionMessage>,
 }
 
+#[allow(dead_code)]
 impl AgentSession {
     pub fn new(id: impl Into<String>) -> Self {
         let now = now_ms();

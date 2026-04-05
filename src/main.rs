@@ -2,6 +2,7 @@ mod agent;
 mod core;
 mod live2d;
 mod mcp;
+mod stt;
 mod tts;
 
 use std::path::PathBuf;

@@ -8,3 +8,7 @@
 /.claude/
 /CLAUDE.md
 /.vscode/
+
+# Model files
+assets/models/**/*.bin
+assets/models/**/*.gguf

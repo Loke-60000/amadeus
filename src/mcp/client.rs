@@ -94,6 +94,7 @@ impl McpClient {
         Ok(McpToolResult { content, is_error })
     }
 
+    #[allow(dead_code)]
     pub fn server_name(&self) -> &str {
         &self.server_name
     }

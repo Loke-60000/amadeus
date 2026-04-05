@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -12,7 +12,7 @@ pub(crate) struct SkillTool {
 
 impl AgentTool for SkillTool {
     fn definition(&self) -> ToolDefinition {
-        let skill_list: Vec<Value> = self.skills.iter().map(|s| {
+        let _skill_list: Vec<Value> = self.skills.iter().map(|s| {
             json!({
                 "name": s.name,
                 "description": s.description,

@@ -1,7 +1,6 @@
 use std::{
     io::{BufRead, BufReader},
     process::{Command, Stdio},
-    sync::Arc,
     thread,
 };
 

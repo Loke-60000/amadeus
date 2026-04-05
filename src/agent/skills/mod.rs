@@ -14,6 +14,7 @@ pub(crate) struct Skill {
     /// The prompt template body
     pub prompt_template: String,
     /// Source file path
+    #[allow(dead_code)]
     pub path: PathBuf,
 }
 

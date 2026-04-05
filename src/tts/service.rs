@@ -31,11 +31,11 @@ const SAMPLE_RATE: u32 = 24_000;
 const FRAMES_PER_TEXT_TOKEN: usize = 6;
 const MIN_GENERATED_FRAMES: usize = 48;
 const MAX_GENERATED_FRAMES: usize = 360;
-const DECODE_CHUNK_FRAMES: usize = 10;
+const DECODE_CHUNK_FRAMES: usize = 20;
 const STREAM_FIRST_CHUNK_EMIT_FRAMES: usize = 5;
 const STREAM_FIRST_CHUNK_TOTAL_FRAMES: usize = 48;
 const STREAM_FIRST_CHUNK_DECODE_WINDOW_FRAMES: usize = 48;
-const STREAM_STABLE_DECODE_WINDOW_FRAMES: usize = 80;
+const STREAM_STABLE_DECODE_WINDOW_FRAMES: usize = 48;
 const STREAM_OVERLAP_SAMPLES: usize = 512;
 const SAMPLES_PER_CODEC_FRAME: usize = 1_920;
 const CPU_TTS_MEMORY_HINT_GIB: usize = 9;
@@ -208,7 +208,7 @@ fn tts_worker_unavailable(reason: &str) -> AppError {
 #[cfg(target_os = "linux")]
 fn lower_tts_worker_priority() {
     unsafe {
-        libc::setpriority(libc::PRIO_PROCESS, 0, 10);
+        libc::setpriority(libc::PRIO_PROCESS, 0, 5);
     }
 }
 
@@ -650,14 +650,17 @@ fn post_process_stream_chunk(
         apply_hann_fade_in(&mut chunk, STREAM_OVERLAP_SAMPLES);
     }
 
-    let full_chunk = chunk.clone();
+    // Only the tail is needed for the next crossfade — avoid cloning the full buffer.
+    let tail_start = chunk.len().saturating_sub(STREAM_OVERLAP_SAMPLES * 2);
+    let tail = chunk[tail_start..].to_vec();
+
     if final_chunk {
         apply_hann_fade_out(&mut chunk, STREAM_OVERLAP_SAMPLES);
     } else if STREAM_OVERLAP_SAMPLES > 0 && chunk.len() > STREAM_OVERLAP_SAMPLES * 2 {
         chunk.truncate(chunk.len() - STREAM_OVERLAP_SAMPLES);
     }
 
-    *decoded_tail = Some(full_chunk);
+    *decoded_tail = Some(tail);
     chunk
 }
 

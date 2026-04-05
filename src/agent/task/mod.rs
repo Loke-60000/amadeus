@@ -1,3 +1,3 @@
 mod model;
 
-pub(crate) use model::{Task, TaskId, TaskRegistry, TaskStatus, TaskType};
+pub(crate) use model::{TaskRegistry, TaskStatus, TaskType};

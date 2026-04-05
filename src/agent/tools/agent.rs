@@ -2,11 +2,10 @@ use std::{
     io::{BufRead, BufReader},
     path::PathBuf,
     process::{Command, Stdio},
-    sync::Arc,
     thread,
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -42,7 +41,7 @@ impl AgentTool for AgentSpawnTool {
         )
     }
 
-    fn invoke(&self, input: Value, ctx: &ToolContext) -> Result<ToolOutcome> {
+    fn invoke(&self, input: Value, _ctx: &ToolContext) -> Result<ToolOutcome> {
         let args: AgentArgs =
             serde_json::from_value(input).context("invalid Agent arguments")?;
 

@@ -81,6 +81,7 @@ struct BashArgs {
     cwd: Option<String>,
     timeout_secs: Option<u64>,
     use_shell: Option<bool>,
+    #[allow(dead_code)]
     description: Option<String>,
 }
 

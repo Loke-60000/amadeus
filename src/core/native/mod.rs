@@ -11,7 +11,7 @@ mod imp {
         ptr,
         sync::{
             Arc, Mutex, OnceLock,
-            atomic::{AtomicU32, AtomicU64, Ordering},
+            atomic::{AtomicI32, AtomicU32, AtomicU64, AtomicU8, Ordering},
             mpsc::{self, TryRecvError},
         },
         thread,
@@ -29,6 +29,10 @@ mod imp {
             ui::{AgentUiService, AgentUiTurnRequest},
         },
         live2d::config::Live2dPaths,
+        stt::{
+            SttService, SttTranscript,
+            config::discover_stt_runtime_config,
+        },
         tts::{
             TtsRequest, TtsService, TtsStreamEvent, config::TtsRuntimeConfig,
             detection::is_japanese, discover_tts_runtime_config, filter::filter_for_tts,
@@ -62,11 +66,53 @@ mod imp {
     const LIP_SYNC_MIN_RMS: f32 = 0.012;
     const LIP_SYNC_MAX_RMS: f32 = 0.180;
 
+    const STT_STATE_IDLE: i32 = 0;
+    const STT_STATE_LISTENING: i32 = 1;
+    const STT_STATE_PROCESSING: i32 = 2;
+    const STT_STATE_RESPONDING: i32 = 3;
+
     type NativeTextDeltaCallback = unsafe extern "C" fn(*mut c_void, *const c_char);
     type NativeStreamEventCallback = unsafe extern "C" fn(*mut c_void, i32, *const c_char);
 
+    const VOICE_LANG_AUTO: u8 = 0;
+    const VOICE_LANG_ENGLISH: u8 = 1;
+    const VOICE_LANG_JAPANESE: u8 = 2;
+
     static NATIVE_UI_RUNTIME: OnceLock<NativeUiRuntime> = OnceLock::new();
+    /// Set when the user interrupts Kurisu mid-response so the next turn can acknowledge it.
+    static VOICE_WAS_INTERRUPTED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    /// True while a TTS segment is actively synthesising or playing.
+    static IS_TTS_PLAYING: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    /// Monotonically-increasing counter; each new voice-turn gets the next value.
+    /// Threads that don't hold the current ID skip the final state update.
+    static CURRENT_TURN_ID: AtomicU64 = AtomicU64::new(0);
+    static NATIVE_RUNTIME_INFO: OnceLock<CString> = OnceLock::new();
+    // Device name list is owned by SttService (STT_DEVICE_NAMES in service.rs) and read
+    // via SttService::device_count() / device_name_at(). No separate static needed here.
     static NATIVE_LIP_SYNC_VALUE_BITS: AtomicU32 = AtomicU32::new(0);
+    static NATIVE_STT_STATE: AtomicI32 = AtomicI32::new(STT_STATE_IDLE);
+    static NATIVE_VOICE_LANG_PREF: AtomicU8 = AtomicU8::new(VOICE_LANG_AUTO);
+    /// Millisecond timestamp until which STT finals should be suppressed after TTS ends (echo window).
+    static TTS_MUTE_UNTIL_MS: AtomicU64 = AtomicU64::new(0);
+
+    fn tts_echo_suppressed() -> bool {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        TTS_MUTE_UNTIL_MS.load(Ordering::Relaxed) > now
+    }
+
+    fn set_tts_mute_window(ms: u64) {
+        let until = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64
+            + ms;
+        TTS_MUTE_UNTIL_MS.store(until, Ordering::Relaxed);
+    }
 
     unsafe extern "C" {
         fn amadeus_cubism_viewer_last_error_message() -> *const c_char;
@@ -152,13 +198,18 @@ mod imp {
     struct NativeUiRuntime {
         agent_service: Option<AgentUiService>,
         voice_player: Option<NativeVoicePlayer>,
+        stt_service: Option<Arc<SttService>>,
         agent_enabled: bool,
         voice_enabled: bool,
+        stt_enabled: bool,
         status_message: CString,
     }
 
     impl NativeUiRuntime {
         fn initialize(workspace_root: &Path) -> Self {
+            let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+            let assets_root = manifest_dir.join("assets");
+
             let mut agent_enabled = false;
             let mut provider = "unconfigured".to_string();
             let mut model = "(unset)".to_string();
@@ -190,11 +241,19 @@ mod imp {
                 initialize_native_voice_player(discover_tts_runtime_config());
             let voice_enabled = voice_player.is_some();
 
+            let (stt_service, stt_error) =
+                initialize_native_stt(discover_stt_runtime_config(&assets_root));
+            let stt_enabled = stt_service.is_some();
+
             let status = if let Some(error) = agent_error {
                 format!("Native renderer is live, but the agent is unavailable: {error}")
             } else if !agent_enabled {
                 "Native renderer is live, but no agent model is configured in .amadeus/config.json."
                     .to_string()
+            } else if voice_enabled && stt_enabled {
+                format!(
+                    "Connected to {provider} / {model}. Voice input ready. Press Esc to stop the current reply."
+                )
             } else if voice_enabled {
                 format!(
                     "Connected to {provider} / {model}. Type below and press Enter. Captions and voice begin as the reply streams in. Press Esc to stop the current reply."
@@ -209,11 +268,24 @@ mod imp {
                 )
             };
 
+            if let Some(error) = stt_error {
+                eprintln!("STT unavailable: {error}");
+            }
+
+            let runtime_info = if agent_enabled {
+                format!("{provider} / {model}")
+            } else {
+                "agent not configured".to_string()
+            };
+            let _ = NATIVE_RUNTIME_INFO.set(sanitize_c_string(&runtime_info));
+
             Self {
                 agent_service,
                 voice_player,
+                stt_service,
                 agent_enabled,
                 voice_enabled,
+                stt_enabled,
                 status_message: sanitize_c_string(&status),
             }
         }
@@ -251,6 +323,35 @@ mod imp {
             priming_stream.finish(&response.reply);
             Ok(response.reply)
         }
+
+        /// Runs an agent turn triggered by voice input and pipes the reply to TTS directly,
+        /// without needing C++ callbacks. Used by the STT dispatch thread.
+        fn run_voice_turn(&self, prompt: &str) -> Result<()> {
+            let service = self
+                .agent_service
+                .as_ref()
+                .context("the native agent runtime is not configured")?;
+
+            // If the user interrupted the last response, prepend a note so Kurisu is aware.
+            let was_interrupted =
+                VOICE_WAS_INTERRUPTED.swap(false, Ordering::Relaxed);
+            let effective_prompt = if was_interrupted {
+                format!("[Note: your previous response was interrupted mid-sentence — you were cut off. Acknowledge briefly if relevant.]\n\n{prompt}")
+            } else {
+                prompt.to_string()
+            };
+
+            let mut voice_stream = SttVoiceEnqueueStream::new(self.voice_player.as_ref());
+            let _response = service.run_turn_streaming(
+                AgentUiTurnRequest {
+                    prompt: effective_prompt,
+                    session_id: Some(NATIVE_SESSION_ID.to_string()),
+                },
+                &mut voice_stream,
+            )?;
+            voice_stream.flush_remaining();
+            Ok(())
+        }
     }
 
     fn initialize_native_voice_player(
@@ -270,6 +371,125 @@ mod imp {
         let service =
             TtsService::new(tts_config.clone()).map_err(|error| anyhow!(error.to_string()))?;
         NativeVoicePlayer::new(service)
+    }
+
+    fn initialize_native_stt(
+        config: crate::stt::config::SttRuntimeConfig,
+    ) -> (Option<Arc<SttService>>, Option<String>) {
+        if !config.enabled {
+            return (None, None);
+        }
+
+        match SttService::new(config) {
+            Ok(stt) => {
+                (Some(Arc::new(stt)), None)
+            }
+            Err(error) => (None, Some(error)),
+        }
+    }
+
+    /// Streams agent reply text directly to the voice player, sentence by sentence.
+    /// Used when STT triggers a voice turn without C++ callback involvement.
+    struct SttVoiceEnqueueStream<'a> {
+        voice_player: Option<&'a NativeVoicePlayer>,
+        buffer: String,
+        start_generation: u64,
+    }
+
+    impl<'a> SttVoiceEnqueueStream<'a> {
+        fn new(voice_player: Option<&'a NativeVoicePlayer>) -> Self {
+            let start_generation = voice_player.map_or(0, |p| p.current_generation());
+            Self {
+                voice_player,
+                buffer: String::new(),
+                start_generation,
+            }
+        }
+
+        /// Returns true if the user cleared the player mid-stream (i.e. pressed Esc).
+        fn was_interrupted(&self) -> bool {
+            self.voice_player
+                .map_or(false, |p| p.current_generation() != self.start_generation)
+        }
+
+        fn flush_remaining(&mut self) {
+            if self.was_interrupted() {
+                self.buffer.clear();
+                return;
+            }
+            let Some(player) = self.voice_player else { return };
+            let remaining = self.buffer.trim().to_string();
+            self.buffer.clear();
+            if !remaining.is_empty() {
+                let _ = player.enqueue(&remaining);
+            }
+        }
+
+        fn try_flush_sentence(&mut self) {
+            if self.was_interrupted() {
+                self.buffer.clear();
+                return;
+            }
+            let Some(player) = self.voice_player else { return };
+
+            let boundary = self.buffer.rfind(|c| {
+                matches!(c, '.' | '!' | '?' | '\n' | '。' | '！' | '？')
+            });
+
+            if let Some(pos) = boundary {
+                let end = pos + self.buffer[pos..].chars().next().map_or(1, char::len_utf8);
+                let segment = self.buffer[..end].trim().to_string();
+                self.buffer = self.buffer[end..].to_string();
+                if !segment.is_empty() {
+                    let _ = player.enqueue(&segment);
+                }
+            }
+        }
+    }
+
+    impl TextStreamSink for SttVoiceEnqueueStream<'_> {
+        fn on_text_delta(&mut self, delta: &str) -> anyhow::Result<()> {
+            if self.was_interrupted() {
+                self.buffer.clear();
+                return Ok(());
+            }
+            self.buffer.push_str(delta);
+            self.try_flush_sentence();
+            Ok(())
+        }
+
+        fn on_tool_call_round(&mut self, _: &[ModelToolCall]) -> anyhow::Result<()> {
+            self.buffer.clear();
+            Ok(())
+        }
+    }
+
+    /// Runs a voice turn synchronously. Only updates UI state if this thread still
+    /// holds the current turn ID (i.e., no newer turn has been spawned since).
+    fn dispatch_stt_transcript(text: &str, turn_id: u64) {
+        let Some(runtime) = native_ui_runtime() else {
+            return;
+        };
+        if text.trim().is_empty() {
+            return;
+        }
+
+        if let Err(e) = runtime.run_voice_turn(text) {
+            eprintln!("STT dispatch failed: {e}");
+        }
+
+        // Only update state if we're still the latest turn
+        if CURRENT_TURN_ID.load(Ordering::Relaxed) == turn_id {
+            if runtime.stt_service.as_ref().is_some_and(|s| s.is_listening()) {
+                NATIVE_STT_STATE.store(STT_STATE_LISTENING, Ordering::Relaxed);
+            } else {
+                NATIVE_STT_STATE.store(STT_STATE_IDLE, Ordering::Relaxed);
+            }
+        }
+    }
+
+    fn set_native_stt_state(state: i32) {
+        NATIVE_STT_STATE.store(state, Ordering::Relaxed);
     }
 
     struct NativeStreamCallbackAdapter {
@@ -584,6 +804,10 @@ mod imp {
             let _ = self.sender.send(VoiceCommand::Clear { generation });
         }
 
+        fn current_generation(&self) -> u64 {
+            self.generation.load(Ordering::SeqCst)
+        }
+
         fn enqueue(&self, text: &str) -> Result<()> {
             let trimmed = text.trim();
             if trimmed.is_empty() {
@@ -607,7 +831,7 @@ mod imp {
             self.tts.prime(TtsRequest {
                 text: trimmed.to_string(),
                 speaker: None,
-                language: None,
+                language: current_tts_language_override(),
             });
         }
     }
@@ -637,6 +861,16 @@ mod imp {
             let command = if let Some(command) = pending.pop_front() {
                 command
             } else {
+                // Queue emptied — Kurisu finished speaking. Clear the playing flag,
+                // set a short post-echo mute window, and flush the STT buffer so
+                // captured TTS audio doesn't trigger a spurious turn.
+                IS_TTS_PLAYING.store(false, Ordering::Relaxed);
+                set_tts_mute_window(1_200);
+                if let Some(runtime) = NATIVE_UI_RUNTIME.get() {
+                    if let Some(stt) = &runtime.stt_service {
+                        stt.clear_buffer();
+                    }
+                }
                 match command_receiver.recv() {
                     Ok(command) => command,
                     Err(_) => break,
@@ -647,6 +881,7 @@ mod imp {
                 VoiceCommand::Clear { generation } => {
                     current_generation = generation;
                     pending.clear();
+                    IS_TTS_PLAYING.store(false, Ordering::Relaxed);
                     set_native_lip_sync_value(0.0);
                 }
                 VoiceCommand::Enqueue { generation, text } => {
@@ -665,6 +900,10 @@ mod imp {
                         Ok(sink) => sink,
                         Err(_) => continue,
                     };
+
+                    // Mark TTS as actively playing so the dispatch loop can distinguish
+                    // user interruptions from post-TTS echo.
+                    IS_TTS_PLAYING.store(true, Ordering::Relaxed);
 
                     let use_non_streaming = should_use_non_streaming_voice_path(&text);
                     let mut stream = None;
@@ -694,7 +933,7 @@ mod imp {
                         stream = match tts.synthesize_streaming(TtsRequest {
                             text: text.clone(),
                             speaker: None,
-                            language: None,
+                            language: current_tts_language_override(),
                         }) {
                             Ok(stream) => Some(stream),
                             Err(error) => {
@@ -860,7 +1099,7 @@ mod imp {
             .synthesize(TtsRequest {
                 text: text.to_string(),
                 speaker: None,
-                language: None,
+                language: current_tts_language_override(),
             })
             .map_err(|error| anyhow!(error.to_string()))?;
 
@@ -953,6 +1192,67 @@ mod imp {
 
     fn initialize_native_ui_runtime(workspace_root: &Path) {
         let _ = NATIVE_UI_RUNTIME.get_or_init(|| NativeUiRuntime::initialize(workspace_root));
+
+        // Spawn STT dispatch thread after the runtime is stored in the OnceLock
+        if let Some(runtime) = NATIVE_UI_RUNTIME.get() {
+            if let Some(stt) = &runtime.stt_service {
+                if let Some(transcript_rx) = stt.take_transcript_receiver() {
+                    thread::Builder::new()
+                        .name("amadeus-stt-dispatch".to_string())
+                        .spawn(move || {
+                            while let Ok(SttTranscript { text, is_final }) = transcript_rx.recv() {
+                                if is_final {
+                                    let tts_active = IS_TTS_PLAYING.load(Ordering::Relaxed);
+                                    let echo_window = tts_echo_suppressed();
+
+                                    if tts_active {
+                                        // User spoke while Kurisu was talking — interrupt immediately.
+                                        VOICE_WAS_INTERRUPTED.store(true, Ordering::Relaxed);
+                                        IS_TTS_PLAYING.store(false, Ordering::Relaxed);
+                                        set_tts_mute_window(0);
+                                        if let Some(rt) = NATIVE_UI_RUNTIME.get() {
+                                            if let Some(player) = &rt.voice_player {
+                                                player.clear();
+                                            }
+                                            if let Some(stt) = &rt.stt_service {
+                                                stt.clear_buffer();
+                                            }
+                                        }
+                                        // Fall through to spawn the new turn below.
+                                    } else if echo_window {
+                                        // Post-TTS echo window — discard.
+                                        set_native_stt_partial_text("");
+                                        set_native_stt_state(STT_STATE_LISTENING);
+                                        if let Some(rt) = NATIVE_UI_RUNTIME.get() {
+                                            if let Some(stt) = &rt.stt_service {
+                                                stt.clear_buffer();
+                                            }
+                                        }
+                                        continue;
+                                    }
+
+                                    // Spawn the turn on its own thread so the dispatch loop
+                                    // stays free to receive and act on the next transcript.
+                                    let turn_id = CURRENT_TURN_ID.fetch_add(1, Ordering::Relaxed) + 1;
+                                    set_native_stt_partial_text("");
+                                    set_native_stt_state(STT_STATE_RESPONDING);
+                                    let text_owned = text.clone();
+                                    thread::Builder::new()
+                                        .name("amadeus-voice-turn".to_string())
+                                        .spawn(move || dispatch_stt_transcript(&text_owned, turn_id))
+                                        .ok();
+                                } else if !IS_TTS_PLAYING.load(Ordering::Relaxed)
+                                    && !tts_echo_suppressed()
+                                {
+                                    set_native_stt_partial_text(&text);
+                                    set_native_stt_state(STT_STATE_PROCESSING);
+                                }
+                            }
+                        })
+                        .ok();
+                }
+            }
+        }
     }
 
     fn native_ui_runtime() -> Option<&'static NativeUiRuntime> {
@@ -1122,8 +1422,27 @@ mod imp {
         STORAGE.get_or_init(|| Mutex::new(sanitize_c_string("")))
     }
 
+    fn current_tts_language_override() -> Option<String> {
+        match NATIVE_VOICE_LANG_PREF.load(Ordering::Relaxed) {
+            VOICE_LANG_ENGLISH => Some("english".to_string()),
+            VOICE_LANG_JAPANESE => Some("japanese".to_string()),
+            _ => None,
+        }
+    }
+
     fn set_native_lip_sync_value(value: f32) {
         NATIVE_LIP_SYNC_VALUE_BITS.store(value.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+    }
+
+    fn native_stt_partial_text_storage() -> &'static Mutex<CString> {
+        static STORAGE: OnceLock<Mutex<CString>> = OnceLock::new();
+        STORAGE.get_or_init(|| Mutex::new(sanitize_c_string("")))
+    }
+
+    fn set_native_stt_partial_text(text: &str) {
+        if let Ok(mut slot) = native_stt_partial_text_storage().lock() {
+            *slot = sanitize_c_string(text);
+        }
     }
 
     fn set_native_error(message: impl Into<String>) {
@@ -1260,6 +1579,11 @@ mod imp {
         set_native_lip_sync_value(0.0);
         if let Some(player) = native_ui_runtime().and_then(|runtime| runtime.voice_player.as_ref())
         {
+            if IS_TTS_PLAYING.load(Ordering::Relaxed) {
+                VOICE_WAS_INTERRUPTED.store(true, Ordering::Relaxed);
+                IS_TTS_PLAYING.store(false, Ordering::Relaxed);
+                set_tts_mute_window(0);
+            }
             player.clear();
         }
     }
@@ -1347,6 +1671,152 @@ mod imp {
         });
 
         duration_ms
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn amadeus_native_stt_available() -> i32 {
+        native_ui_runtime()
+            .map(|runtime| i32::from(runtime.stt_enabled))
+            .unwrap_or(0)
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn amadeus_native_stt_state() -> i32 {
+        NATIVE_STT_STATE.load(Ordering::Relaxed)
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn amadeus_native_stt_start() -> i32 {
+        let Some(runtime) = native_ui_runtime() else {
+            return 0;
+        };
+        let Some(stt) = runtime.stt_service.as_ref() else {
+            return 0;
+        };
+        stt.start_listening();
+        set_native_stt_state(STT_STATE_LISTENING);
+        1
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn amadeus_native_stt_stop() -> i32 {
+        let Some(runtime) = native_ui_runtime() else {
+            return 0;
+        };
+        let Some(stt) = runtime.stt_service.as_ref() else {
+            return 0;
+        };
+        stt.stop_listening();
+        set_native_stt_state(STT_STATE_IDLE);
+        1
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn amadeus_native_stt_set_sensitivity(level: i32) {
+        if let Some(runtime) = native_ui_runtime() {
+            if let Some(stt) = runtime.stt_service.as_ref() {
+                stt.set_sensitivity(level);
+            }
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn amadeus_native_voice_set_language(lang: i32) {
+        let value = match lang {
+            1 => VOICE_LANG_ENGLISH,
+            2 => VOICE_LANG_JAPANESE,
+            _ => VOICE_LANG_AUTO,
+        };
+        NATIVE_VOICE_LANG_PREF.store(value, Ordering::Relaxed);
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn amadeus_native_agent_runtime_info() -> *const c_char {
+        NATIVE_RUNTIME_INFO
+            .get()
+            .map(|s| s.as_ptr())
+            .unwrap_or(ptr::null())
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn amadeus_native_stt_device_count() -> i32 {
+        SttService::device_count() as i32
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn amadeus_native_stt_device_name(index: i32) -> *const c_char {
+        // We materialise a CString per call and store it in a thread-local to give
+        // the C++ caller a stable pointer for the duration of its stack frame.
+        // This is safe because C++ only holds the pointer while inside CaptureSnapshot.
+        use std::cell::RefCell;
+        thread_local! {
+            static SCRATCH: RefCell<Option<CString>> = const { RefCell::new(None) };
+        }
+        match SttService::device_name_at(index as usize) {
+            Some(name) => SCRATCH.with(|s| {
+                let cs = sanitize_c_string(&name);
+                let ptr = cs.as_ptr();
+                *s.borrow_mut() = Some(cs);
+                ptr
+            }),
+            None => ptr::null(),
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn amadeus_native_stt_select_device(index: i32) {
+        if let Some(runtime) = native_ui_runtime() {
+            if let Some(stt) = runtime.stt_service.as_ref() {
+                stt.set_device(index as usize);
+            }
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn amadeus_native_stt_mic_level() -> f32 {
+        SttService::mic_level()
+    }
+
+    /// Returns the index of the device the STT worker actually has open (-1 = none/default).
+    /// C++ should use this to keep its displayed device index in sync after failed switches.
+    #[unsafe(no_mangle)]
+    pub extern "C" fn amadeus_native_stt_active_device_index() -> i32 {
+        SttService::active_device_index()
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn amadeus_native_set_mic_gain_db(db: f32) {
+        if let Some(rt) = native_ui_runtime() {
+            if let Some(stt) = &rt.stt_service {
+                stt.set_mic_gain_db(db);
+            }
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn amadeus_native_set_mic_gate(threshold: f32) {
+        if let Some(rt) = native_ui_runtime() {
+            if let Some(stt) = &rt.stt_service {
+                stt.set_mic_gate(threshold);
+            }
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn amadeus_native_set_mic_compressor(threshold_db: f32, ratio: f32) {
+        if let Some(rt) = native_ui_runtime() {
+            if let Some(stt) = &rt.stt_service {
+                stt.set_mic_compressor(threshold_db, ratio);
+            }
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn amadeus_native_stt_partial_text() -> *const c_char {
+        native_stt_partial_text_storage()
+            .lock()
+            .map(|g| g.as_ptr())
+            .unwrap_or(ptr::null())
     }
 
     #[cfg(test)]

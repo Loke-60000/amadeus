@@ -30,6 +30,7 @@ pub struct McpToolResult {
 #[derive(Clone, Debug, Deserialize)]
 pub struct McpContent {
     #[serde(rename = "type")]
+    #[allow(dead_code)]
     pub kind: String,
     pub text: Option<String>,
 }

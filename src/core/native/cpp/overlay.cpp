@@ -17,6 +17,22 @@ extern "C"
 const char* amadeus_native_bridge_status_message();
 int amadeus_native_agent_available();
 int amadeus_native_voice_available();
+int amadeus_native_stt_available();
+int amadeus_native_stt_state();
+int amadeus_native_stt_start();
+int amadeus_native_stt_stop();
+void amadeus_native_stt_set_sensitivity(int level);
+int amadeus_native_stt_device_count();
+const char* amadeus_native_stt_device_name(int index);
+void amadeus_native_stt_select_device(int index);
+float amadeus_native_stt_mic_level();
+int amadeus_native_stt_active_device_index();
+const char* amadeus_native_stt_partial_text();
+void amadeus_native_set_mic_gain_db(float db);
+void amadeus_native_set_mic_gate(float threshold);
+void amadeus_native_set_mic_compressor(float threshold_db, float ratio);
+void amadeus_native_voice_set_language(int lang);
+const char* amadeus_native_agent_runtime_info();
 char* amadeus_native_agent_turn(const char* prompt);
 int amadeus_native_agent_turn_stream(
     const char* prompt,
@@ -243,8 +259,16 @@ void AmadeusOverlay::Initialize() {
     std::lock_guard<std::mutex> lock(mutex_);
     agent_enabled_ = amadeus_native_agent_available() != 0;
     voice_enabled_ = amadeus_native_voice_available() != 0;
+    stt_enabled_ = amadeus_native_stt_available() != 0;
+    runtime_info_ = ReadBridgeMessage(amadeus_native_agent_runtime_info());
     request_in_flight_ = false;
     reveal_active_ = false;
+    settings_open_ = false;
+    settings_row_ = 0;
+    stt_device_index_ = 0;
+    app_mode_ = AppMode::Chat;
+    voice_lang_ = VoiceLang::Auto;
+    stt_sensitivity_ = VadSensitivity::Medium;
     active_generation_ = 0;
     status_ = ReadBridgeMessage(amadeus_native_bridge_status_message());
     if (status_.empty()) {
@@ -723,17 +747,44 @@ void AmadeusOverlay::SubmitPrompt() {
 
 AmadeusOverlay::Snapshot AmadeusOverlay::CaptureSnapshot() {
     std::lock_guard<std::mutex> lock(mutex_);
-    return Snapshot{
-        agent_enabled_,
-        voice_enabled_,
-        request_in_flight_,
-        reveal_active_,
-        status_,
-        input_,
-        subtitle_,
-        visible_reply_,
-        transcript_,
-    };
+    Snapshot snap;
+    snap.agent_enabled    = agent_enabled_;
+    snap.voice_enabled    = voice_enabled_;
+    snap.stt_enabled      = stt_enabled_;
+    snap.request_in_flight = request_in_flight_;
+    snap.reveal_active    = reveal_active_;
+    snap.settings_open    = settings_open_;
+    snap.settings_row     = settings_row_;
+    snap.stt_state        = amadeus_native_stt_state();
+    snap.stt_device_count = amadeus_native_stt_device_count();
+    // Sync displayed device index with what the worker actually has open.
+    // If a switch failed, the worker's index stays at the last working device.
+    {
+        const int active = amadeus_native_stt_active_device_index();
+        if (active >= 0 && active != stt_device_index_) {
+            stt_device_index_ = active;
+        }
+    }
+    snap.stt_device_index = stt_device_index_;
+    snap.stt_mic_level    = amadeus_native_stt_mic_level();
+    snap.stt_partial_text = ReadBridgeMessage(amadeus_native_stt_partial_text());
+    if (snap.stt_device_count > 0) {
+        const char* name = amadeus_native_stt_device_name(stt_device_index_);
+        snap.stt_device_name = name ? name : "";
+    }
+    snap.mic_gain_step    = mic_gain_step_;
+    snap.mic_gate_step    = mic_gate_step_;
+    snap.mic_comp_step    = mic_comp_step_;
+    snap.app_mode         = app_mode_;
+    snap.voice_lang       = voice_lang_;
+    snap.stt_sensitivity  = stt_sensitivity_;
+    snap.status           = status_;
+    snap.input            = input_;
+    snap.subtitle         = subtitle_;
+    snap.visible_reply    = visible_reply_;
+    snap.runtime_info     = runtime_info_;
+    snap.transcript       = transcript_;
+    return snap;
 }
 
 void AmadeusOverlay::ApplyStreamTextDelta(std::uint64_t generation, const std::string& delta) {
@@ -828,6 +879,110 @@ void AmadeusOverlay::ApplyStreamError(std::uint64_t generation, const std::strin
 void AmadeusOverlay::HandleKey(GLFWwindow* window, int key, int action, int mods) {
     if (action != GLFW_PRESS && action != GLFW_REPEAT) {
         return;
+    }
+
+    // Tab toggles the settings panel
+    if (key == GLFW_KEY_TAB && action == GLFW_PRESS) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        settings_open_ = !settings_open_;
+        settings_row_ = 0;
+        return;
+    }
+
+    // Settings navigation while panel is open
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (settings_open_) {
+            switch (key) {
+            case GLFW_KEY_ESCAPE:
+                settings_open_ = false;
+                return;
+            case GLFW_KEY_UP:
+                if (settings_row_ > 0) {
+                    --settings_row_;
+                }
+                return;
+            case GLFW_KEY_DOWN: {
+                // Rows: 0=Mode, 1=Voice Language, [2=Sensitivity, 3=Device, 4=Gain, 5=Gate, 6=Compressor] (stt)
+                // Agent info is read-only and not navigable
+                const int max_row = stt_enabled_ ? 6 : 1;
+                if (settings_row_ < max_row) {
+                    ++settings_row_;
+                }
+                return;
+            }
+            case GLFW_KEY_LEFT:
+            case GLFW_KEY_RIGHT: {
+                const int dir = (key == GLFW_KEY_RIGHT) ? 1 : -1;
+                switch (settings_row_) {
+                case 0: {
+                    // Mode
+                    const int m = static_cast<int>(app_mode_) + dir;
+                    app_mode_ = static_cast<AppMode>(std::max(0, std::min(1, m)));
+                    if (app_mode_ == AppMode::SpeechToSpeech && stt_enabled_) {
+                        amadeus_native_stt_start();
+                    } else {
+                        amadeus_native_stt_stop();
+                    }
+                    break;
+                }
+                case 1: {
+                    // Voice Language
+                    const int l = static_cast<int>(voice_lang_) + dir;
+                    voice_lang_ = static_cast<VoiceLang>(std::max(0, std::min(2, l)));
+                    amadeus_native_voice_set_language(static_cast<int>(voice_lang_));
+                    break;
+                }
+                case 2: {
+                    // Microphone Sensitivity
+                    const int s = static_cast<int>(stt_sensitivity_) + dir;
+                    stt_sensitivity_ = static_cast<VadSensitivity>(std::max(0, std::min(2, s)));
+                    amadeus_native_stt_set_sensitivity(static_cast<int>(stt_sensitivity_));
+                    break;
+                }
+                case 3: {
+                    // Mic Device
+                    const int count = amadeus_native_stt_device_count();
+                    if (count > 0) {
+                        const int d = stt_device_index_ + dir;
+                        stt_device_index_ = std::max(0, std::min(count - 1, d));
+                        amadeus_native_stt_select_device(stt_device_index_);
+                    }
+                    break;
+                }
+                case 4: {
+                    // Mic Gain: 9 steps, -12..+12 dB in 3 dB increments (index 4 = 0 dB)
+                    mic_gain_step_ = std::max(0, std::min(8, mic_gain_step_ + dir));
+                    amadeus_native_set_mic_gain_db(static_cast<float>((mic_gain_step_ - 4) * 3));
+                    break;
+                }
+                case 5: {
+                    // Noise Gate: Off / Low / Medium / High
+                    mic_gate_step_ = std::max(0, std::min(3, mic_gate_step_ + dir));
+                    const float gate_thresholds[] = { 0.0f, 0.005f, 0.010f, 0.020f };
+                    amadeus_native_set_mic_gate(gate_thresholds[mic_gate_step_]);
+                    break;
+                }
+                case 6: {
+                    // Compressor: Off / Light / Medium / Heavy
+                    mic_comp_step_ = std::max(0, std::min(3, mic_comp_step_ + dir));
+                    // {threshold_db, ratio}
+                    const float comp_threshold[] = { -30.0f, -24.0f, -30.0f, -36.0f };
+                    const float comp_ratio[]     = {   1.0f,   3.0f,   5.0f,   8.0f };
+                    amadeus_native_set_mic_compressor(
+                        comp_threshold[mic_comp_step_],
+                        comp_ratio[mic_comp_step_]);
+                    break;
+                }
+                default:
+                    break;
+                }
+                return;
+            }
+            default:
+                return;
+            }
+        }
     }
 
     if ((mods & GLFW_MOD_CONTROL) != 0 && key == GLFW_KEY_V) {

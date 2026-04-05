@@ -4,12 +4,14 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = ["cuda"]
+default = ["cuda", "stt-cuda"]
 cuda = ["qwen3-tts/cuda"]
 flash-attn = ["cuda", "qwen3-tts/flash-attn"]
 metal = ["qwen3-tts/metal"]
 mkl = ["qwen3-tts/mkl"]
 accelerate = ["qwen3-tts/accelerate"]
+stt-vulkan = ["whisper-rs/vulkan"]
+stt-cuda = ["whisper-rs/cuda"]
 
 [dependencies]
 anyhow = "1.0"
@@ -17,6 +19,8 @@ html2text = "0.12"
 uuid = { version = "1", features = ["v4"] }
 candle-core = "0.9"
 candle-nn = "0.9"
+cpal = "0.15"
+whisper-rs = { version = "0.16", default-features = false }
 globset = "0.4.16"
 hound = "3.5"
 libc = "0.2"

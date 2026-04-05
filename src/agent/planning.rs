@@ -9,6 +9,7 @@ pub enum PlanMode {
 }
 
 /// A question the agent wants to ask the user interactively.
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct PendingQuestion {
     pub question: String,
@@ -25,6 +26,7 @@ pub struct PlanningState {
     pending_answer: Arc<Mutex<Option<String>>>,
 }
 
+#[allow(dead_code)]
 impl PlanningState {
     pub fn new() -> Self {
         Self {

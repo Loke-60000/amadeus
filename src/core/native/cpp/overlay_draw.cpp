@@ -244,6 +244,292 @@ void AmadeusOverlay::DrawInputBar(
         1.0f);
 }
 
+void AmadeusOverlay::DrawSettingsButton(
+    const AmadeusTextRenderer& text_renderer,
+    int window_width) const {
+    constexpr float kButtonMargin = 16.0f;
+    const std::string label = "[Tab] Settings";
+    const float label_w = static_cast<float>(text_renderer.MeasureTextWidth(label));
+    const float btn_w = label_w + 24.0f;
+    const float btn_h = static_cast<float>(text_renderer.line_height()) + 14.0f;
+    const float x = window_width - btn_w - kButtonMargin;
+    const float y = kButtonMargin;
+    DrawFilledRect(x, y, btn_w, btn_h, 0.07f, 0.11f, 0.14f, 0.82f);
+    text_renderer.DrawText(x + 12.0f, y + 8.0f, label, 0.68f, 0.78f, 0.85f, 1.0f);
+}
+
+void AmadeusOverlay::DrawSettingsPanel(
+    const AmadeusTextRenderer& text_renderer,
+    const Snapshot& snapshot,
+    int window_width,
+    int window_height) const {
+    const float line_h = static_cast<float>(text_renderer.line_height());
+
+    // Panel width: fill most of the window but cap at 760px
+    const float panel_w = std::min(760.0f, std::max(560.0f, window_width * 0.62f));
+    const float pad_x   = 32.0f;
+    const float pad_y   = 28.0f;
+    const float row_h   = line_h + 24.0f;   // generous vertical breathing room
+    const float label_w = panel_w * 0.40f;  // 40% for label, 60% for value
+    const float header_h = line_h + 36.0f;
+
+    // Row count: 0=Mode, 1=Voice Language, [2=Sensitivity, 3=Device, 4=Gain, 5=Gate, 6=Compressor] (stt only), last=Agent Info
+    // When STT: extra row_h for the level meter below the device row
+    const int num_setting_rows = snapshot.stt_enabled ? 7 : 2;
+    const int total_rows = num_setting_rows + 1; // +1 for read-only agent info
+    const float level_meter_extra = snapshot.stt_enabled ? row_h : 0.0f;
+    const float panel_h = header_h + pad_y + (total_rows * row_h) + level_meter_extra + pad_y;
+
+    const float x = (window_width - panel_w) * 0.5f;
+    const float y = (window_height - panel_h) * 0.38f;
+
+    // Background
+    DrawFilledRect(x, y, panel_w, panel_h, 0.04f, 0.06f, 0.09f, 0.95f);
+
+    // Title + hint on the same header line
+    text_renderer.DrawText(x + pad_x, y + pad_y, "SETTINGS", 0.95f, 0.97f, 1.0f, 1.0f);
+    const std::string hint = "Tab / Esc to close    \xE2\x86\x90\xE2\x86\x92 change value";
+    const float hint_w = static_cast<float>(text_renderer.MeasureTextWidth(hint));
+    text_renderer.DrawText(
+        x + panel_w - pad_x - hint_w,
+        y + pad_y,
+        hint,
+        0.42f, 0.52f, 0.58f, 1.0f);
+
+    // Separator line under header
+    DrawFilledRect(x + pad_x, y + header_h - 4.0f, panel_w - pad_x * 2.0f, 1.0f,
+                   0.20f, 0.30f, 0.38f, 0.70f);
+
+    float row_y = y + header_h + pad_y * 0.5f;
+
+    const auto draw_row = [&](int row_idx, const std::string& label, const std::string& value, bool read_only) {
+        const bool selected = (!read_only && row_idx == snapshot.settings_row);
+
+        // Highlight background for the selected row
+        if (selected) {
+            DrawFilledRect(
+                x + 6.0f,
+                row_y - 4.0f,
+                panel_w - 12.0f,
+                row_h - 2.0f,
+                0.10f, 0.22f, 0.32f, 0.90f);
+        }
+
+        // Vertically center text within row_h
+        const float text_y = row_y + (row_h - line_h) * 0.5f - 2.0f;
+
+        // Label
+        const float label_alpha = read_only ? 0.55f : (selected ? 1.0f : 0.80f);
+        text_renderer.DrawText(x + pad_x, text_y, label,
+                               0.75f, 0.82f, 0.88f, label_alpha);
+
+        // Value
+        const float val_x = x + pad_x + label_w;
+        if (!read_only) {
+            const float arrow_alpha = selected ? 0.85f : 0.35f;
+            text_renderer.DrawText(val_x, text_y, "<  ",
+                                   0.55f, 0.68f, 0.75f, arrow_alpha);
+            const float left_w = static_cast<float>(text_renderer.MeasureTextWidth("<  "));
+            text_renderer.DrawText(val_x + left_w, text_y, value,
+                                   0.96f, 0.98f, 1.0f, 1.0f);
+            const float val_w = static_cast<float>(text_renderer.MeasureTextWidth(value));
+            text_renderer.DrawText(val_x + left_w + val_w, text_y, "  >",
+                                   0.55f, 0.68f, 0.75f, arrow_alpha);
+        } else {
+            const std::string display = value.empty() ? "not configured" : value;
+            text_renderer.DrawText(val_x, text_y, display,
+                                   0.68f, 0.74f, 0.80f, 0.90f);
+        }
+
+        row_y += row_h;
+    };
+
+    // Row 0: Mode
+    draw_row(0, "Mode",
+             snapshot.app_mode == AppMode::SpeechToSpeech ? "Speech-to-speech" : "Chat",
+             false);
+
+    // Row 1: Voice Language
+    std::string lang_val;
+    switch (snapshot.voice_lang) {
+        case VoiceLang::English:  lang_val = "English";  break;
+        case VoiceLang::Japanese: lang_val = "Japanese"; break;
+        default:                  lang_val = "Auto";     break;
+    }
+    draw_row(1, "Voice Language", lang_val, false);
+
+    // Row 2: Mic Sensitivity (only when STT available)
+    if (snapshot.stt_enabled) {
+        std::string sens_val;
+        switch (snapshot.stt_sensitivity) {
+            case VadSensitivity::Low:  sens_val = "Low";    break;
+            case VadSensitivity::High: sens_val = "High";   break;
+            default:                   sens_val = "Medium"; break;
+        }
+        draw_row(2, "Mic Sensitivity", sens_val, false);
+
+        // Row 3: Mic Device
+        std::string device_val = snapshot.stt_device_name.empty()
+            ? "Default"
+            : snapshot.stt_device_name;
+        // Truncate long device names to fit the column
+        const float max_val_w = panel_w - pad_x - label_w - 80.0f;
+        while (!device_val.empty()
+            && static_cast<float>(text_renderer.MeasureTextWidth(device_val)) > max_val_w) {
+            // Trim from end, codepoint by codepoint
+            std::size_t trim = device_val.size() - 1;
+            while (trim > 0 && (static_cast<unsigned char>(device_val[trim]) & 0xC0u) == 0x80u) {
+                --trim;
+            }
+            device_val = device_val.substr(0, trim) + "...";
+            // Break after one truncation attempt to avoid infinite loop
+            break;
+        }
+        draw_row(3, "Mic Device", device_val, false);
+
+        // Mic level meter — drawn below the device row
+        {
+            const float meter_x     = x + pad_x + label_w;
+            const float meter_y     = row_y + (row_h - 10.0f) * 0.5f - 4.0f;
+            const float meter_w     = panel_w - pad_x - label_w - pad_x;
+            const float meter_h     = 8.0f;
+            const float fill        = std::min(1.0f, snapshot.stt_mic_level * 8.0f); // scale up small values
+
+            // Track background
+            DrawFilledRect(x + pad_x, meter_y, meter_w + (label_w - pad_x), meter_h,
+                           0.08f, 0.12f, 0.16f, 0.80f);
+            // Level label
+            text_renderer.DrawText(x + pad_x, meter_y - line_h * 0.5f - 2.0f,
+                                   "Mic Level", 0.55f, 0.62f, 0.68f, 0.80f);
+            // Fill bar — colour shifts green → yellow → red with level
+            const float bar_r = std::min(1.0f, fill * 2.0f);
+            const float bar_g = std::min(1.0f, 2.0f - fill * 2.0f);
+            DrawFilledRect(meter_x, meter_y,
+                           (meter_w) * fill, meter_h,
+                           bar_r * 0.6f + 0.1f,
+                           bar_g * 0.7f + 0.2f,
+                           0.20f,
+                           0.90f);
+            // Tick marks every 25%
+            for (int t = 1; t < 4; ++t) {
+                const float tick_x = meter_x + meter_w * (t * 0.25f);
+                DrawFilledRect(tick_x, meter_y, 1.0f, meter_h,
+                               0.30f, 0.40f, 0.50f, 0.60f);
+            }
+
+            row_y += row_h;
+        }
+
+        // Row 4: Mic Gain
+        {
+            const int gain_db = (snapshot.mic_gain_step - 4) * 3;
+            std::string gain_val;
+            if (gain_db > 0)       gain_val = "+" + std::to_string(gain_db) + " dB";
+            else if (gain_db == 0) gain_val = "0 dB";
+            else                   gain_val = std::to_string(gain_db) + " dB";
+            draw_row(4, "Mic Gain", gain_val, false);
+        }
+
+        // Row 5: Noise Gate
+        {
+            const char* gate_labels[] = { "Off", "Low", "Medium", "High" };
+            draw_row(5, "Noise Gate", gate_labels[snapshot.mic_gate_step], false);
+        }
+
+        // Row 6: Compressor
+        {
+            const char* comp_labels[] = { "Off", "Light", "Medium", "Heavy" };
+            draw_row(6, "Compressor", comp_labels[snapshot.mic_comp_step], false);
+        }
+    }
+
+    // Agent info (read-only)
+    draw_row(num_setting_rows, "Agent", snapshot.runtime_info, true);
+
+    // STT state badge when speech mode is active
+    if (snapshot.stt_enabled && snapshot.app_mode == AppMode::SpeechToSpeech) {
+        const char* badge = nullptr;
+        float br = 0.60f, bg = 0.90f, bb = 0.65f;
+        switch (snapshot.stt_state) {
+            case 1:  badge = "  Listening...";  br = 0.40f; bg = 0.85f; bb = 0.55f; break;
+            case 2:  badge = "  Processing..."; br = 0.90f; bg = 0.80f; bb = 0.30f; break;
+            case 3:  badge = "  Responding..."; br = 0.40f; bg = 0.70f; bb = 0.95f; break;
+            default: badge = "  Mic standby";                                         break;
+        }
+        text_renderer.DrawText(x + pad_x, y + panel_h - line_h - 10.0f, badge, br, bg, bb, 0.92f);
+    }
+}
+
+void AmadeusOverlay::DrawSttMicIndicator(
+    const AmadeusTextRenderer& text_renderer,
+    const Snapshot& snapshot,
+    int window_width,
+    int window_height) const {
+    const float line_h = static_cast<float>(text_renderer.line_height());
+    const float pad    = 18.0f;
+    const float bar_w  = 220.0f;
+    const float bar_h  = 8.0f;
+
+    // If there's partial text, show it above the bar
+    const bool has_partial = !snapshot.stt_partial_text.empty();
+    const float partial_area_h = has_partial ? (line_h + 10.0f) : 0.0f;
+
+    const float pill_w = std::min(static_cast<float>(window_width) - 40.0f,
+                                  std::max(bar_w + pad * 2.0f,
+                                           has_partial
+                                               ? static_cast<float>(text_renderer.MeasureTextWidth(snapshot.stt_partial_text)) + pad * 2.0f
+                                               : 0.0f));
+    const float pill_h = bar_h + line_h + 22.0f + partial_area_h;
+    const float x      = (window_width - pill_w) * 0.5f;
+    const float y      = window_height - pill_h - 36.0f;
+
+    // State label and colour
+    const char* state_text = "Mic standby";
+    float sr = 0.50f, sg = 0.65f, sb = 0.55f;
+    switch (snapshot.stt_state) {
+        case 1: state_text = "Listening";  sr = 0.30f; sg = 0.88f; sb = 0.45f; break;
+        case 2: state_text = "Processing"; sr = 0.92f; sg = 0.78f; sb = 0.20f; break;
+        case 3: state_text = "Responding"; sr = 0.30f; sg = 0.62f; sb = 0.98f; break;
+        default: break;
+    }
+
+    DrawFilledRect(x, y, pill_w, pill_h, 0.04f, 0.06f, 0.09f, 0.88f);
+
+    // State label (top row)
+    const float state_w = static_cast<float>(text_renderer.MeasureTextWidth(state_text));
+    text_renderer.DrawText(x + (pill_w - state_w) * 0.5f, y + 8.0f, state_text,
+                           sr, sg, sb, 1.0f);
+
+    // Partial transcription text (below state label)
+    if (has_partial) {
+        text_renderer.DrawText(x + pad, y + 8.0f + line_h + 4.0f,
+                               snapshot.stt_partial_text,
+                               0.94f, 0.96f, 1.0f, 0.95f);
+    }
+
+    // Level bar (bottom row)
+    const float bar_x = x + (pill_w - bar_w) * 0.5f;
+    const float bar_y = y + pill_h - bar_h - 8.0f;
+
+    // Track
+    DrawFilledRect(bar_x, bar_y, bar_w, bar_h, 0.10f, 0.15f, 0.20f, 0.90f);
+
+    // Fill — green → yellow → red
+    const float fill = std::min(1.0f, snapshot.stt_mic_level * 8.0f);
+    if (fill > 0.004f) {
+        const float bar_r = std::min(1.0f, fill * 2.0f);
+        const float bar_g = std::min(1.0f, 2.0f - fill * 2.0f);
+        DrawFilledRect(bar_x, bar_y, bar_w * fill, bar_h,
+                       bar_r * 0.50f + 0.08f, bar_g * 0.72f + 0.18f, 0.18f, 0.92f);
+    }
+
+    // Tick marks at 25%, 50%, 75%
+    for (int t = 1; t < 4; ++t) {
+        DrawFilledRect(bar_x + bar_w * (t * 0.25f), bar_y, 1.0f, bar_h,
+                       0.28f, 0.36f, 0.46f, 0.65f);
+    }
+}
+
 void AmadeusOverlay::Render(const AmadeusTextRenderer& text_renderer, int window_width, int window_height) {
     if (!text_renderer.IsReady()) {
         return;
@@ -251,7 +537,18 @@ void AmadeusOverlay::Render(const AmadeusTextRenderer& text_renderer, int window
 
     const Snapshot snapshot = CaptureSnapshot();
     BeginOverlay(window_width, window_height);
-    DrawSubtitleStage(text_renderer, snapshot, window_width, window_height);
-    DrawInputBar(text_renderer, snapshot, window_width, window_height);
+
+    if (snapshot.settings_open) {
+        DrawSettingsPanel(text_renderer, snapshot, window_width, window_height);
+    } else {
+        DrawSubtitleStage(text_renderer, snapshot, window_width, window_height);
+        if (snapshot.app_mode != AppMode::SpeechToSpeech) {
+            DrawInputBar(text_renderer, snapshot, window_width, window_height);
+        } else if (snapshot.stt_enabled) {
+            DrawSttMicIndicator(text_renderer, snapshot, window_width, window_height);
+        }
+    }
+
+    DrawSettingsButton(text_renderer, window_width);
     EndOverlay();
 }

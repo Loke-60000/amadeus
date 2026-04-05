@@ -6,6 +6,7 @@ use std::{
 use anyhow::{Context, Result};
 
 /// A single file loaded from the memory directory.
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct MemoryFile {
     pub name: String,
@@ -14,12 +15,14 @@ pub struct MemoryFile {
 }
 
 /// Manages AMADEUS.md and the .amadeus/memory/ directory.
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct MemorySystem {
     workspace_root: PathBuf,
     memory_dir: PathBuf,
 }
 
+#[allow(dead_code)]
 impl MemorySystem {
     pub fn new(workspace_root: PathBuf) -> Self {
         let memory_dir = workspace_root.join(".amadeus").join("memory");

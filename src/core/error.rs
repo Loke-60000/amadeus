@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
+#[allow(dead_code)]
 #[derive(Debug, Error)]
 pub enum AppError {
     #[error("unable to resolve the workspace layout from {manifest_dir}")]
@@ -20,6 +21,10 @@ pub enum AppError {
     TtsRuntimeUnavailable { reason: String },
     #[error("the local TTS synthesis request failed: {reason}")]
     TtsSynthesisFailed { reason: String },
+    #[error("the local STT runtime is unavailable: {reason}")]
+    SttRuntimeUnavailable { reason: String },
+    #[error("the local STT transcription failed: {reason}")]
+    SttTranscriptionFailed { reason: String },
     #[error("the Linux webview container could not be created")]
     MissingGtkContainer,
     #[error(transparent)]

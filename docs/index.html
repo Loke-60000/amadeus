@@ -146,7 +146,8 @@
       top: 0;
       left: 50%;
       transform: translateX(-50%);
-      width: 1170px;
+      width: 100%;
+      max-width: 1170px;
       height: 58px;
       z-index: 21;
       display: flex;
@@ -226,8 +227,9 @@
       align-items: center;
       gap: 18px;
     }
-    .logo-icon  { height: 82px; width: auto; display: block; filter: brightness(0) invert(1); }
-    .logo-title { height: 58px; width: auto; display: block; }
+    .logo-icon  { height: 82px; width: auto; display: block; filter: brightness(0) invert(1); flex-shrink: 0; }
+    .logo-title { height: 58px; width: auto; display: block; flex-shrink: 1; min-width: 0; max-width: 100%; }
+    #site-name  { min-width: 0; overflow: hidden; }
 
     /* ─ Site Nav (transparent, height:72px, at bottom of header) */
     #site-nav-wrapper {
@@ -289,7 +291,59 @@
     /* Mobile */
     #nav-icon-wrapper {
       display: none;
+      align-items: center;
+      cursor: pointer;
+      padding: 14px;
+      flex-shrink: 0;
     }
+    #nav-icon {
+      width: 28px;
+      height: 20px;
+      position: relative;
+    }
+    #nav-icon span {
+      display: block;
+      position: absolute;
+      height: 3px;
+      width: 100%;
+      background: #fff;
+      border-radius: 2px;
+      opacity: 1;
+      transition: 0.3s ease;
+    }
+    #nav-icon span:nth-child(1) { top: 0; }
+    #nav-icon span:nth-child(2),
+    #nav-icon span:nth-child(3) { top: 8px; }
+    #nav-icon span:nth-child(4) { top: 16px; }
+    #nav-icon.open span:nth-child(1) { top: 8px; width: 0; opacity: 0; left: 50%; }
+    #nav-icon.open span:nth-child(2) { transform: rotate(45deg); }
+    #nav-icon.open span:nth-child(3) { transform: rotate(-45deg); }
+    #nav-icon.open span:nth-child(4) { top: 8px; width: 0; opacity: 0; left: 50%; }
+
+    #mobile-nav {
+      display: none;
+      position: fixed;
+      top: 70px;
+      left: 0;
+      right: 0;
+      background: rgba(8, 73, 163, 0.97);
+      z-index: 19;
+      padding: 8px 0;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    }
+    #mobile-nav.open { display: block; }
+    #mobile-nav ul li a {
+      display: block;
+      padding: 13px 20px;
+      color: rgba(255,255,255,0.9);
+      font-size: 15px;
+      font-weight: 400;
+      border-bottom: 1px solid rgba(255,255,255,0.1);
+      text-decoration: none;
+    }
+    #mobile-nav ul li:last-child a { border-bottom: none; }
+    #mobile-nav ul li a:hover { background: rgba(255,255,255,0.1); color: #fff; text-decoration: none; }
+
     #search-icon-wrapper-mobile { display: none; }
 
     /* ─── HERO CAROUSEL ────────────────────────────────────────── */
@@ -686,7 +740,9 @@
       gap: 16px;
     }
     #footer-cu-homepage {
-      display: inline-block;
+      display: flex;
+      align-items: center;
+      flex-shrink: 0;
     }
     #footer-cu-homepage img.logo-icon-footer {
       height: 49px; width: auto;
@@ -709,6 +765,7 @@
       display: flex;
       gap: 10px;
       margin-left: auto;
+      flex-shrink: 0;
     }
     #cu-social-links a {
       color: rgba(255,255,255,0.75);
@@ -762,9 +819,28 @@
     }
 
     /* ─── RESPONSIVE ─────────────────────────────────────────── */
+
+    /* ── Tablet: ≤1100px — shrink header/logo before breakpoint ── */
+    @media (max-width: 1100px) {
+      #header { height: 170px; }
+      #branding { height: 106px; }
+      .logo-icon  { height: 62px; }
+      .logo-title { height: 44px; }
+      #site-nav-wrapper { height: 64px; }
+      #site-nav ul.nav li a { font-size: 18px; }
+    }
+
+    /* ── Tablet: ≤991px ── */
     @media (max-width: 991px) {
-      #hero-wrap { height: 480px; }
-      .slide-layer-text h2 { font-size: 32px; }
+      #header { height: 152px; }
+      #branding { height: 90px; }
+      .logo-icon  { height: 54px; }
+      .logo-title { height: 38px; }
+      #site-nav-wrapper { height: 62px; }
+      #site-nav ul.nav li a { font-size: 16px; }
+      #hero-wrap { height: 460px; }
+      .slide-layer-text h2 { font-size: 30px; }
+      .cu-links a { font-size: 15px; padding: 10px 22px; }
       .card-inner-row { grid-template-columns: repeat(3, 1fr) !important; }
       .highlights-cell.cell-large { width: 100%; height: 250px; }
       .highlights-cell.cell-sm { width: 50%; }
@@ -774,22 +850,44 @@
       .highlights-cell:nth-child(5) { left: 50%; top: 498px; }
       .highlights-carousel { height: 746px; }
     }
+
+    /* ── Mobile: ≤767px ── */
     @media (max-width: 767px) {
       #nav-wrapper { display: none; }
-      #header { height: auto; min-height: 70px; position: fixed; }
-      #branding { height: 70px; }
-      #site-name img { width: 240px; height: auto; }
+      #header { position: fixed; height: auto; min-height: 70px; }
+      #branding { height: 70px; padding: 0; }
+      #brand-wrapper-inner { display: flex; align-items: center; }
+      #branded-site-name { flex: 1; min-width: 0; overflow: hidden; display: flex; align-items: center; }
+      #site-name { min-width: 0; overflow: hidden; }
+      #site-name a { gap: 10px; overflow: hidden; }
+      /* Show only the icon on mobile — text logo has no room */
+      .logo-icon  { height: 40px; flex-shrink: 0; }
+      .logo-title { display: none; }
       #site-nav-wrapper { display: none; }
       #nav-icon-wrapper { display: flex; }
-      #hero-wrap { margin-top: 70px; height: 380px; }
-      .slide-layer-text { left: 12px !important; right: 12px !important; text-align: left !important; }
-      .slide-layer-text h2 { font-size: 24px; }
+      #hero-wrap { margin-top: 70px; height: 360px; }
+      .slide-layer-text { bottom: 3.5em; left: 12px !important; right: 12px !important; text-align: left !important; }
+      .slide-layer-text h2 { font-size: 22px; margin-bottom: 14px; }
+      .cu-links a { font-size: 13px; padding: 9px 16px; }
+      .section-label-heading { font-size: 18px; }
       .card-inner-row { grid-template-columns: repeat(2, 1fr) !important; }
+      .media-style-1 .card-inner-row { grid-template-columns: 1fr !important; }
       .highlights-carousel { height: auto; position: static; }
-      .highlights-cell { position: static !important; width: 100% !important; height: 200px !important; display: block; margin-bottom: 4px; }
-      #site-footer ul.first-level { flex-direction: column; }
-      #cu-footer .row { flex-direction: column; }
+      .highlights-cell { position: relative !important; width: 100% !important; height: 200px !important; display: block; margin-bottom: 4px; }
+      #site-footer { padding: 30px 0 20px; }
+      #site-footer ul.first-level { flex-direction: column; gap: 20px; }
+      #site-footer ul.first-level > li { padding-right: 0; }
+      #cu-footer .row { flex-direction: column; align-items: flex-start; gap: 12px; }
       #cu-social-links { margin-left: 0; }
+      .logo-title-footer { display: none; }
+    }
+
+    /* ── Small mobile: ≤479px ── */
+    @media (max-width: 479px) {
+      #hero-wrap { height: 280px; }
+      .slide-layer-text h2 { font-size: 18px; }
+      .cu-links a { font-size: 12px; padding: 8px 14px; }
+      .card-inner-row { grid-template-columns: 1fr !important; }
     }
   </style>
 </head>
@@ -827,7 +925,7 @@
         <div id="brand-wrapper-inner">
           <!-- Mobile hamburger (hidden on desktop) -->
           <div id="nav-icon-wrapper">
-            <div id="nav-icon" onclick="document.getElementById('mobile-nav').classList.toggle('open')">
+            <div id="nav-icon" onclick="this.classList.toggle('open');document.getElementById('mobile-nav').classList.toggle('open')">
               <span></span><span></span><span></span><span></span>
             </div>
           </div>
@@ -877,6 +975,15 @@
     </nav>
 
   </header><!-- /header -->
+
+  <!-- Mobile nav drawer (shown below fixed header on small screens) -->
+  <nav id="mobile-nav" aria-label="Mobile navigation">
+    <ul>
+      <li><a href="https://github.com/Loke-60000/amadeus" target="_blank" rel="noopener">Amadeus</a></li>
+      <li><a href="https://discord.gg/32habcPdkn" target="_blank" rel="noopener">Discord</a></li>
+      <li><a href="https://www.youtube.com/channel/UCBDEGOJJcms0ucXLpyFI6pg" target="_blank" rel="noopener">YouTube</a></li>
+    </ul>
+  </nav>
 
   <!-- ══ MAIN CONTENT ═══════════════════════════════════════════════ -->
   <main role="main" class="main-container">
@@ -1351,7 +1458,7 @@
           <div>
             <a href="#" id="footer-cu-homepage" style="display:flex;align-items:center;gap:12px">
               <img src="assets/logo/icon.png" alt="" class="logo-icon-footer"/>
-              <img src="assets/logo/title.png" alt="Viktor Chondria University" style="height:36px;width:auto"/>
+              <img src="assets/logo/title.png" alt="Viktor Chondria University" class="logo-title-footer" style="height:36px;width:auto;max-width:200px"/>
             </a>
           </div>
           <div id="cu-footer-links">
@@ -1423,10 +1530,6 @@ document.addEventListener('keydown', e => {
 });
 
 // ── Mobile nav ───────────────────────────────────────────────────────
-const navIconWrap = document.getElementById('nav-icon-wrapper');
-if (navIconWrap) {
-  navIconWrap.style.cssText = 'display:none;cursor:pointer;padding:14px;flex-direction:column;gap:5px';
-}
 </script>
 </body>
 </html>

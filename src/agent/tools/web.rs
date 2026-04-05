@@ -277,16 +277,6 @@ fn ddg_search(query: &str, num_results: usize) -> Result<Vec<Value>> {
     Ok(results)
 }
 
-fn urlencoding_encode(s: &str) -> String {
-    s.chars()
-        .map(|c| match c {
-            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => c.to_string(),
-            ' ' => "+".to_string(),
-            _ => format!("%{:02X}", c as u32),
-        })
-        .collect()
-}
-
 // Inline simple URL encoding to avoid extra dependency
 mod urlencoding {
     pub fn encode(s: &str) -> String {
