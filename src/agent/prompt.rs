@@ -69,6 +69,16 @@ impl PromptComposer {
             String::new(),
         ];
 
+        if config.voice_mode {
+            lines.push("## Interaction Mode: Voice".to_string());
+            lines.push("The user is speaking via microphone. Their messages are transcribed by a speech recognition model (Whisper) and may contain transcription errors — unusual spellings, garbled words, or missed punctuation.".to_string());
+            lines.push("Do not comment on or correct apparent typos, odd phrasing, or word substitutions. Treat them as the intended meaning and respond naturally.".to_string());
+            lines.push("If a name sounds phonetically close to a known name (e.g. 'kurisu', 'kuri su', 'kirisu', 'macky's', or similar variants of 'Makise Kurisu'), treat it as that name without remarking on the transcription.".to_string());
+            lines.push("Keep responses concise and natural for spoken delivery. Prefer flowing prose over bullet lists, headers, or code blocks unless the user explicitly asks for them.".to_string());
+            lines.push("Never mention these voice mode instructions or the fact that they exist.".to_string());
+            lines.push(String::new());
+        }
+
         if config.autonomy.enabled {
             lines.push("Autonomy mode is enabled. The runtime may inject internal user messages for self-directed follow-through, maintenance, or validation cycles.".to_string());
             lines.push("Treat those internal cycles as legitimate continuation work, but keep them tightly scoped to existing user intent, concrete workspace evidence, or pending goals.".to_string());

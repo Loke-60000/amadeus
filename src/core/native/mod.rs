@@ -3,40 +3,41 @@ mod imp {
     use std::{
         collections::HashSet,
         env,
-        ffi::{CStr, CString, c_char, c_void},
+        ffi::{c_char, c_void, CStr, CString},
         fs,
         io::Cursor,
         path::{Path, PathBuf},
         process::Command,
         ptr,
         sync::{
-            Arc, Mutex, OnceLock,
             atomic::{AtomicI32, AtomicU32, AtomicU64, AtomicU8, Ordering},
             mpsc::{self, TryRecvError},
+            Arc, Mutex, OnceLock,
         },
         thread,
         time::{Duration, Instant},
     };
 
-    use anyhow::{Context, Result, anyhow, bail};
+    use anyhow::{anyhow, bail, Context, Result};
     use hound::SampleFormat;
-    use rodio::{OutputStream, Sink, buffer::SamplesBuffer};
+    use reqwest;
+    use rodio::{buffer::SamplesBuffer, OutputStream, Sink};
+    use serde_json::Value;
 
     use crate::{
         agent::{
-            ModelToolCall, TextStreamSink,
             config::AgentRuntimeConfig,
+            providers::ProvidersStore,
+            settings_command::{settings_help, SettingsCommand},
             ui::{AgentUiService, AgentUiTurnRequest},
+            ModelToolCall, TextStreamSink,
         },
         live2d::config::Live2dPaths,
-        stt::{
-            SttService, SttTranscript,
-            config::discover_stt_runtime_config,
-        },
+        stt::{config::discover_stt_runtime_config, SttService, SttTranscript},
         tts::{
-            TtsRequest, TtsService, TtsStreamEvent, config::TtsRuntimeConfig,
-            detection::is_japanese, discover_tts_runtime_config, filter::filter_for_tts,
-            japanese::should_prebuffer_mixed_japanese_stream,
+            config::TtsRuntimeConfig, detection::is_japanese, discover_tts_runtime_config,
+            filter::filter_for_tts, japanese::should_prebuffer_mixed_japanese_stream, TtsRequest,
+            TtsService, TtsStreamEvent,
         },
     };
 
@@ -79,6 +80,13 @@ mod imp {
     const VOICE_LANG_JAPANESE: u8 = 2;
 
     static NATIVE_UI_RUNTIME: OnceLock<NativeUiRuntime> = OnceLock::new();
+    /// Workspace root stashed before the Cubism viewer runs so amadeus_native_init_services()
+    /// can call initialize_native_ui_runtime without needing it passed as a parameter.
+    static NATIVE_WORKSPACE_ROOT: OnceLock<PathBuf> = OnceLock::new();
+    static NATIVE_PROVIDERS_STORE: OnceLock<Mutex<ProvidersStore>> = OnceLock::new();
+    static NATIVE_PROVIDERS_NAMES: OnceLock<Vec<CString>> = OnceLock::new();
+    static NATIVE_ACTIVE_PROVIDER_INDEX: AtomicI32 = AtomicI32::new(-1);
+    static NATIVE_PROVIDER_CATALOG: OnceLock<ProviderCatalog> = OnceLock::new();
     /// Set when the user interrupts Kurisu mid-response so the next turn can acknowledge it.
     static VOICE_WAS_INTERRUPTED: std::sync::atomic::AtomicBool =
         std::sync::atomic::AtomicBool::new(false);
@@ -135,14 +143,28 @@ mod imp {
             .context("failed to discover Live2D model assets")?;
         let runtime_dir = prepare_shader_runtime(&manifest_dir)?;
         configure_native_log_output(&runtime_dir, show_logs_terminal)?;
-        initialize_native_ui_runtime(&workspace_root);
+
+        // Stash workspace root so amadeus_native_init_services() (called by C++ after the
+        // boot loading phase) can complete the service initialization.
+        let _ = NATIVE_WORKSPACE_ROOT.set(workspace_root.clone());
+
+        // Initialize providers (lightweight JSON load) so the preflight can check
+        // whether the Amadeus built-in LLM is the configured provider.
+        initialize_providers(&workspace_root);
+
+        // Kick off model pre-flight downloads now, before the boot screen renders,
+        // so the loading bars in RunModelLoadingPhase() show real progress.
+        preflight_model_downloads(&assets_root);
+
         let model_path = live2d
             .model_path
             .canonicalize()
             .with_context(|| format!("failed to resolve {}", live2d.model_path.display()))?;
 
         // Expose assets directory so the C++ boot sequence can find frame images
-        unsafe { env::set_var("AMADEUS_ASSETS_DIR", &assets_root); }
+        unsafe {
+            env::set_var("AMADEUS_ASSETS_DIR", &assets_root);
+        }
 
         let _cwd_guard = CurrentDirGuard::change_to(&runtime_dir)?;
         let model_path = path_to_cstring(&model_path)?;
@@ -196,13 +218,17 @@ mod imp {
     }
 
     struct NativeUiRuntime {
-        agent_service: Option<AgentUiService>,
+        /// Wrapped in `Mutex<Option<Arc<…>>>` so:
+        ///   1. The service can be (re)initialized after a config save.
+        ///   2. Callers can clone the Arc and **release the lock before running inference**,
+        ///      preventing long LLM turns from blocking the render thread.
+        agent_service: Mutex<Option<Arc<AgentUiService>>>,
         voice_player: Option<NativeVoicePlayer>,
         stt_service: Option<Arc<SttService>>,
-        agent_enabled: bool,
         voice_enabled: bool,
         stt_enabled: bool,
         status_message: CString,
+        workspace_root: PathBuf,
     }
 
     impl NativeUiRuntime {
@@ -210,23 +236,36 @@ mod imp {
             let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
             let assets_root = manifest_dir.join("assets");
 
-            let mut agent_enabled = false;
             let mut provider = "unconfigured".to_string();
             let mut model = "(unset)".to_string();
             let mut agent_error = None;
 
+            // Track services config for conditional loading; default to all-enabled if config
+            // fails to load so the app still starts.
+            let mut services_tts: Option<bool> = None;
+            let mut services_stt: Option<bool> = None;
+
             let agent_service =
                 match AgentRuntimeConfig::load(Some(workspace_root.to_path_buf()), None) {
                     Ok(mut runtime) => {
+                        // When local LLM is requested override the provider so
+                        // build_model_client() picks up LlamaCppClient.
+                        if runtime.services.local_llm {
+                            runtime.provider = crate::agent::config::LlmProvider::LlamaCpp;
+                        }
+                        services_tts = Some(runtime.services.tts);
+                        services_stt = Some(runtime.services.stt);
                         runtime.normalize_provider_defaults();
                         provider = runtime.provider.to_string();
-                        model = runtime
-                            .model
-                            .clone()
-                            .unwrap_or_else(|| "(unset)".to_string());
-                        if runtime.model.is_some() {
-                            agent_enabled = true;
-                            Some(AgentUiService::new(runtime))
+                        model = runtime.model.clone().unwrap_or_else(|| {
+                            if runtime.services.local_llm {
+                                "local/qwen3-4b-q8".to_string()
+                            } else {
+                                "(unset)".to_string()
+                            }
+                        });
+                        if runtime.model.is_some() || runtime.services.local_llm {
+                            Some(Arc::new(AgentUiService::new(runtime)))
                         } else {
                             None
                         }
@@ -237,12 +276,30 @@ mod imp {
                     }
                 };
 
-            let (voice_player, voice_error) =
-                initialize_native_voice_player(discover_tts_runtime_config());
-            let voice_enabled = voice_player.is_some();
+            let agent_enabled = agent_service.is_some();
 
-            let (stt_service, stt_error) =
-                initialize_native_stt(discover_stt_runtime_config(&assets_root));
+            // Run TTS and STT initialization in parallel — the LLM pre-load thread
+            // was already kicked off inside AgentUiService::new() above.
+            let tts_config = discover_tts_runtime_config(services_tts);
+            let stt_config = discover_stt_runtime_config(&assets_root, services_stt);
+
+            let tts_result: std::sync::Mutex<Option<(Option<NativeVoicePlayer>, Option<String>)>> =
+                std::sync::Mutex::new(None);
+            let stt_result: std::sync::Mutex<Option<(Option<Arc<SttService>>, Option<String>)>> =
+                std::sync::Mutex::new(None);
+
+            thread::scope(|s| {
+                s.spawn(|| {
+                    *tts_result.lock().unwrap() = Some(initialize_native_voice_player(tts_config));
+                });
+                s.spawn(|| {
+                    *stt_result.lock().unwrap() = Some(initialize_native_stt(stt_config));
+                });
+            });
+
+            let (voice_player, voice_error) = tts_result.into_inner().unwrap().unwrap();
+            let (stt_service, stt_error) = stt_result.into_inner().unwrap().unwrap();
+            let voice_enabled = voice_player.is_some();
             let stt_enabled = stt_service.is_some();
 
             let status = if let Some(error) = agent_error {
@@ -280,24 +337,36 @@ mod imp {
             let _ = NATIVE_RUNTIME_INFO.set(sanitize_c_string(&runtime_info));
 
             Self {
-                agent_service,
+                agent_service: Mutex::new(agent_service),
                 voice_player,
                 stt_service,
-                agent_enabled,
                 voice_enabled,
                 stt_enabled,
                 status_message: sanitize_c_string(&status),
+                workspace_root: workspace_root.to_path_buf(),
             }
         }
 
         fn run_turn(&self, prompt: &str) -> Result<String> {
-            let service = self
-                .agent_service
-                .as_ref()
-                .context("the native agent runtime is not configured")?;
+            if let Some(reply) = self.handle_settings_command(prompt)? {
+                return Ok(reply);
+            }
+            // Clone the Arc and release the mutex immediately so the render thread is never
+            // blocked for the duration of inference (which can be many seconds for local LLMs).
+            let service = {
+                let guard = self
+                    .agent_service
+                    .lock()
+                    .map_err(|_| anyhow!("agent service mutex poisoned"))?;
+                guard
+                    .as_ref()
+                    .context("the native agent runtime is not configured")?
+                    .clone()
+            };
             let response = service.run_turn(AgentUiTurnRequest {
                 prompt: prompt.to_string(),
                 session_id: Some(NATIVE_SESSION_ID.to_string()),
+                voice_mode: false,
             })?;
             Ok(response.reply)
         }
@@ -307,16 +376,28 @@ mod imp {
             prompt: &str,
             stream: &mut dyn TextStreamSink,
         ) -> Result<String> {
-            let service = self
-                .agent_service
-                .as_ref()
-                .context("the native agent runtime is not configured")?;
+            if let Some(reply) = self.handle_settings_command(prompt)? {
+                stream.on_text_delta(&reply)?;
+                return Ok(reply);
+            }
+            // Release the lock before inference — same pattern as run_turn.
+            let service = {
+                let guard = self
+                    .agent_service
+                    .lock()
+                    .map_err(|_| anyhow!("agent service mutex poisoned"))?;
+                guard
+                    .as_ref()
+                    .context("the native agent runtime is not configured")?
+                    .clone()
+            };
             let mut priming_stream =
                 NativeStreamingVoicePrimer::new(stream, self.voice_player.as_ref());
             let response = service.run_turn_streaming(
                 AgentUiTurnRequest {
                     prompt: prompt.to_string(),
                     session_id: Some(NATIVE_SESSION_ID.to_string()),
+                    voice_mode: false,
                 },
                 &mut priming_stream,
             )?;
@@ -324,17 +405,45 @@ mod imp {
             Ok(response.reply)
         }
 
+        /// If `prompt` is a `/settings` command, execute it and return the reply.
+        /// Returns `None` if this is a regular agent prompt.
+        fn handle_settings_command(&self, prompt: &str) -> Result<Option<String>> {
+            let trimmed = prompt.trim();
+            if !trimmed.starts_with("/settings") {
+                return Ok(None);
+            }
+            let args = trimmed["/settings".len()..].trim();
+            if args.is_empty() || args == "help" {
+                return Ok(Some(settings_help().to_string()));
+            }
+            let cmd = SettingsCommand::parse(args)?;
+            let reply = cmd.apply(&self.workspace_root)?;
+            // Reload the agent service's base config so changes take effect on the next turn.
+            if let Ok(guard) = self.agent_service.lock() {
+                if let Some(service) = guard.as_ref() {
+                    service.reload_config();
+                }
+            }
+            Ok(Some(reply))
+        }
+
         /// Runs an agent turn triggered by voice input and pipes the reply to TTS directly,
         /// without needing C++ callbacks. Used by the STT dispatch thread.
         fn run_voice_turn(&self, prompt: &str) -> Result<()> {
-            let service = self
-                .agent_service
-                .as_ref()
-                .context("the native agent runtime is not configured")?;
+            // Release the lock before inference — same pattern as run_turn.
+            let service = {
+                let guard = self
+                    .agent_service
+                    .lock()
+                    .map_err(|_| anyhow!("agent service mutex poisoned"))?;
+                guard
+                    .as_ref()
+                    .context("the native agent runtime is not configured")?
+                    .clone()
+            };
 
             // If the user interrupted the last response, prepend a note so Kurisu is aware.
-            let was_interrupted =
-                VOICE_WAS_INTERRUPTED.swap(false, Ordering::Relaxed);
+            let was_interrupted = VOICE_WAS_INTERRUPTED.swap(false, Ordering::Relaxed);
             let effective_prompt = if was_interrupted {
                 format!("[Note: your previous response was interrupted mid-sentence — you were cut off. Acknowledge briefly if relevant.]\n\n{prompt}")
             } else {
@@ -346,6 +455,7 @@ mod imp {
                 AgentUiTurnRequest {
                     prompt: effective_prompt,
                     session_id: Some(NATIVE_SESSION_ID.to_string()),
+                    voice_mode: true,
                 },
                 &mut voice_stream,
             )?;
@@ -381,9 +491,7 @@ mod imp {
         }
 
         match SttService::new(config) {
-            Ok(stt) => {
-                (Some(Arc::new(stt)), None)
-            }
+            Ok(stt) => (Some(Arc::new(stt)), None),
             Err(error) => (None, Some(error)),
         }
     }
@@ -417,7 +525,9 @@ mod imp {
                 self.buffer.clear();
                 return;
             }
-            let Some(player) = self.voice_player else { return };
+            let Some(player) = self.voice_player else {
+                return;
+            };
             let remaining = self.buffer.trim().to_string();
             self.buffer.clear();
             if !remaining.is_empty() {
@@ -430,11 +540,13 @@ mod imp {
                 self.buffer.clear();
                 return;
             }
-            let Some(player) = self.voice_player else { return };
+            let Some(player) = self.voice_player else {
+                return;
+            };
 
-            let boundary = self.buffer.rfind(|c| {
-                matches!(c, '.' | '!' | '?' | '\n' | '。' | '！' | '？')
-            });
+            let boundary = self
+                .buffer
+                .rfind(|c| matches!(c, '.' | '!' | '?' | '\n' | '。' | '！' | '？'));
 
             if let Some(pos) = boundary {
                 let end = pos + self.buffer[pos..].chars().next().map_or(1, char::len_utf8);
@@ -480,7 +592,11 @@ mod imp {
 
         // Only update state if we're still the latest turn
         if CURRENT_TURN_ID.load(Ordering::Relaxed) == turn_id {
-            if runtime.stt_service.as_ref().is_some_and(|s| s.is_listening()) {
+            if runtime
+                .stt_service
+                .as_ref()
+                .is_some_and(|s| s.is_listening())
+            {
                 NATIVE_STT_STATE.store(STT_STATE_LISTENING, Ordering::Relaxed);
             } else {
                 NATIVE_STT_STATE.store(STT_STATE_IDLE, Ordering::Relaxed);
@@ -752,12 +868,12 @@ mod imp {
             let played_samples = ((started_at.elapsed().as_secs_f64() * self.sample_rate as f64)
                 as usize)
                 .min(self.queued_samples.len());
-            let window_samples =
-                ((self.sample_rate as usize * LIP_SYNC_WINDOW_MS) / 1000).max(1);
+            let window_samples = ((self.sample_rate as usize * LIP_SYNC_WINDOW_MS) / 1000).max(1);
             let window_start = played_samples.saturating_sub(window_samples / 2);
             let window_end = (window_start + window_samples).min(self.queued_samples.len());
 
-            let target = lip_sync_target_from_samples(&self.queued_samples[window_start..window_end]);
+            let target =
+                lip_sync_target_from_samples(&self.queued_samples[window_start..window_end]);
             self.smoothed_value = if target >= self.smoothed_value {
                 target
             } else {
@@ -1149,8 +1265,8 @@ mod imp {
     }
 
     fn normalize_lip_sync_rms(rms: f32) -> f32 {
-        let normalized = ((rms - LIP_SYNC_MIN_RMS) / (LIP_SYNC_MAX_RMS - LIP_SYNC_MIN_RMS))
-            .clamp(0.0, 1.0);
+        let normalized =
+            ((rms - LIP_SYNC_MIN_RMS) / (LIP_SYNC_MAX_RMS - LIP_SYNC_MIN_RMS)).clamp(0.0, 1.0);
         normalized.sqrt()
     }
 
@@ -1192,6 +1308,7 @@ mod imp {
 
     fn initialize_native_ui_runtime(workspace_root: &Path) {
         let _ = NATIVE_UI_RUNTIME.get_or_init(|| NativeUiRuntime::initialize(workspace_root));
+        initialize_providers(workspace_root);
 
         // Spawn STT dispatch thread after the runtime is stored in the OnceLock
         if let Some(runtime) = NATIVE_UI_RUNTIME.get() {
@@ -1229,17 +1346,28 @@ mod imp {
                                             }
                                         }
                                         continue;
+                                    } else if NATIVE_STT_STATE.load(Ordering::Relaxed)
+                                        == STT_STATE_RESPONDING
+                                    {
+                                        // Already generating a response — this final is most
+                                        // likely a VAD re-trigger from a brief pause, not a
+                                        // new utterance.  Discard to avoid queuing duplicate
+                                        // LLM requests.
+                                        continue;
                                     }
 
                                     // Spawn the turn on its own thread so the dispatch loop
                                     // stays free to receive and act on the next transcript.
-                                    let turn_id = CURRENT_TURN_ID.fetch_add(1, Ordering::Relaxed) + 1;
+                                    let turn_id =
+                                        CURRENT_TURN_ID.fetch_add(1, Ordering::Relaxed) + 1;
                                     set_native_stt_partial_text("");
                                     set_native_stt_state(STT_STATE_RESPONDING);
                                     let text_owned = text.clone();
                                     thread::Builder::new()
                                         .name("amadeus-voice-turn".to_string())
-                                        .spawn(move || dispatch_stt_transcript(&text_owned, turn_id))
+                                        .spawn(move || {
+                                            dispatch_stt_transcript(&text_owned, turn_id)
+                                        })
                                         .ok();
                                 } else if !IS_TTS_PLAYING.load(Ordering::Relaxed)
                                     && !tts_echo_suppressed()
@@ -1477,7 +1605,8 @@ mod imp {
     #[unsafe(no_mangle)]
     pub extern "C" fn amadeus_native_agent_available() -> i32 {
         native_ui_runtime()
-            .map(|runtime| i32::from(runtime.agent_enabled))
+            .and_then(|runtime| runtime.agent_service.lock().ok())
+            .map(|guard| i32::from(guard.is_some()))
             .unwrap_or(0)
     }
 
@@ -1620,10 +1749,7 @@ mod imp {
     /// duration in milliseconds (or the `fallback_ms` value on any error).
     /// The caller uses the returned duration to sync frame animation to the audio.
     #[unsafe(no_mangle)]
-    pub extern "C" fn amadeus_native_boot_audio_play(
-        path: *const c_char,
-        fallback_ms: u32,
-    ) -> u32 {
+    pub extern "C" fn amadeus_native_boot_audio_play(path: *const c_char, fallback_ms: u32) -> u32 {
         use rodio::Source as _;
         use std::fs::File;
         use std::io::BufReader;
@@ -1819,15 +1945,961 @@ mod imp {
             .unwrap_or(ptr::null())
     }
 
-    #[cfg(test)]
+    // ── providers bridge ──────────────────────────────────────────────────────
+
+    fn initialize_providers(workspace_root: &Path) {
+        let store = ProvidersStore::load(workspace_root);
+        let active_idx = store.active_index().map(|i| i as i32).unwrap_or(-1);
+        NATIVE_ACTIVE_PROVIDER_INDEX.store(active_idx, Ordering::Relaxed);
+
+        let names: Vec<CString> = store
+            .profiles()
+            .iter()
+            .map(|p| sanitize_c_string(&p.name))
+            .collect();
+
+        let _ = NATIVE_PROVIDERS_NAMES.set(names);
+        let _ = NATIVE_PROVIDERS_STORE.set(Mutex::new(store));
+        let _ = NATIVE_PROVIDER_CATALOG.set(ProviderCatalog::init());
+    }
+
+    /// Returns the number of provider profiles saved in `.amadeus/providers.json`.
+    #[unsafe(no_mangle)]
+    pub extern "C" fn amadeus_native_providers_count() -> i32 {
+        NATIVE_PROVIDERS_NAMES
+            .get()
+            .map(|names| names.len() as i32)
+            .unwrap_or(0)
+    }
+
+    /// Returns the display name of the provider at `index`, or null if out of range.
+    /// The pointer is valid until the next call on the same thread.
+    #[unsafe(no_mangle)]
+    pub extern "C" fn amadeus_native_providers_name_at(index: i32) -> *const c_char {
+        NATIVE_PROVIDERS_NAMES
+            .get()
+            .and_then(|names| names.get(index as usize))
+            .map(|cs| cs.as_ptr())
+            .unwrap_or(ptr::null())
+    }
+
+    /// Returns the index of the currently-active provider profile, or -1 if none is active.
+    #[unsafe(no_mangle)]
+    pub extern "C" fn amadeus_native_providers_active_index() -> i32 {
+        NATIVE_ACTIVE_PROVIDER_INDEX.load(Ordering::Relaxed)
+    }
+
+    /// Select the provider profile at `index`: write its settings to `config.json` and reload
+    /// the agent's in-memory config. Has no effect if `index` is out of range.
+    #[unsafe(no_mangle)]
+    pub extern "C" fn amadeus_native_providers_select(index: i32) {
+        let result = (|| -> anyhow::Result<()> {
+            let store = NATIVE_PROVIDERS_STORE
+                .get()
+                .context("providers store was not initialised")?;
+            let guard = store
+                .lock()
+                .map_err(|_| anyhow::anyhow!("providers store mutex poisoned"))?;
+            guard.select(index as usize)?;
+            NATIVE_ACTIVE_PROVIDER_INDEX.store(index, Ordering::Relaxed);
+            if let Some(runtime) = native_ui_runtime() {
+                if let Ok(mut svc_guard) = runtime.agent_service.lock() {
+                    if let Some(service) = svc_guard.as_ref() {
+                        service.reload_config();
+                    } else {
+                        let workspace_root = runtime.workspace_root.clone();
+                        if let Ok(mut runtime_cfg) =
+                            AgentRuntimeConfig::load(Some(workspace_root), None)
+                        {
+                            if runtime_cfg.services.local_llm {
+                                runtime_cfg.provider = crate::agent::config::LlmProvider::LlamaCpp;
+                            }
+                            runtime_cfg.normalize_provider_defaults();
+                            if runtime_cfg.model.is_some() || runtime_cfg.services.local_llm {
+                                *svc_guard = Some(Arc::new(AgentUiService::new(runtime_cfg)));
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(())
+        })();
+
+        if let Err(e) = result {
+            set_native_error(e.to_string());
+        }
+    }
+
+    // ── provider catalog bridge ────────────────────────────────────────────────
+    //
+    // Provider type indices (must match C++ overlay constants):
+    //   0 = Anthropic
+    //   1 = OpenAI
+    //   2 = Gemini
+    //   3 = OpenAI-compatible (custom endpoint)
+    //   4 = Ollama            (fetches model list from /api/tags)
+    //   5 = Llama.cpp         (user-supplied .gguf path)
+    //   6 = Amadeus           (hardcoded Qwen3-4B-q8_0.gguf)
+
+    const AMADEUS_BUILTIN_MODEL_PATH: &str = "assets/models/llm/Qwen3-4B-q8_0.gguf";
+
+    static NATIVE_OLLAMA_MODELS: OnceLock<Mutex<Vec<CString>>> = OnceLock::new();
+    // 0=idle/not-fetched  1=fetching  2=done  3=error
+    static NATIVE_OLLAMA_FETCH_STATUS: AtomicI32 = AtomicI32::new(0);
+
+    fn native_ollama_models() -> &'static Mutex<Vec<CString>> {
+        NATIVE_OLLAMA_MODELS.get_or_init(|| Mutex::new(Vec::new()))
+    }
+
+    struct ProviderCatalog {
+        display_names: Vec<CString>,
+    }
+
+    impl ProviderCatalog {
+        fn init() -> Self {
+            let display_names = [
+                "Anthropic",
+                "OpenAI",
+                "Gemini",
+                "OpenAI-compatible",
+                "Ollama",
+                "Llama.cpp",
+                "Amadeus (built-in)",
+            ]
+            .iter()
+            .map(|s| sanitize_c_string(s))
+            .collect();
+            Self { display_names }
+        }
+    }
+
+    // ── helpers ────────────────────────────────────────────────────────────────
+
+    fn read_config_top_key(workspace_root: &Path, key: &str) -> Option<String> {
+        let path = workspace_root.join(crate::agent::config::DEFAULT_CONFIG_PATH);
+        let raw = fs::read_to_string(path).ok()?;
+        let json: Value = serde_json::from_str(&raw).ok()?;
+        json.get(key)?.as_str().map(|s| s.to_string())
+    }
+
+    fn read_config_json(workspace_root: &Path) -> Value {
+        let path = workspace_root.join(crate::agent::config::DEFAULT_CONFIG_PATH);
+        fs::read_to_string(&path)
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_else(|| Value::Object(serde_json::Map::new()))
+    }
+
+    fn load_or_create_config_json(path: &Path) -> Result<Value> {
+        if path.exists() {
+            let raw = fs::read_to_string(path)
+                .with_context(|| format!("failed to read {}", path.display()))?;
+            serde_json::from_str(&raw)
+                .with_context(|| format!("failed to parse {}", path.display()))
+        } else {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("failed to create {}", parent.display()))?;
+            }
+            Ok(Value::Object(serde_json::Map::new()))
+        }
+    }
+
+    fn set_services_key(root: &mut serde_json::Map<String, Value>, key: &str, value: Value) {
+        root.entry("services")
+            .or_insert_with(|| Value::Object(serde_json::Map::new()))
+            .as_object_mut()
+            .expect("services must be a JSON object")
+            .insert(key.into(), value);
+    }
+
+    fn workspace_root() -> Option<PathBuf> {
+        native_ui_runtime().map(|rt| rt.workspace_root.clone())
+    }
+
+    // Per-field string storages for returning C pointers safely.
+    fn provider_field_storage(slot: usize) -> &'static Mutex<CString> {
+        static SLOTS: OnceLock<[Mutex<CString>; 4]> = OnceLock::new();
+        &SLOTS.get_or_init(|| {
+            [
+                Mutex::new(sanitize_c_string("")),
+                Mutex::new(sanitize_c_string("")),
+                Mutex::new(sanitize_c_string("")),
+                Mutex::new(sanitize_c_string("")),
+            ]
+        })[slot]
+    }
+
+    fn store_provider_field(slot: usize, value: &str) -> *const c_char {
+        let mut guard = provider_field_storage(slot).lock().unwrap();
+        *guard = sanitize_c_string(value);
+        guard.as_ptr()
+    }
+
+    // ── bridge functions ───────────────────────────────────────────────────────
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn amadeus_native_provider_type_count() -> i32 {
+        NATIVE_PROVIDER_CATALOG
+            .get()
+            .map(|c| c.display_names.len() as i32)
+            .unwrap_or(0)
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn amadeus_native_provider_type_name(index: i32) -> *const c_char {
+        NATIVE_PROVIDER_CATALOG
+            .get()
+            .and_then(|c| c.display_names.get(index as usize))
+            .map(|cs| cs.as_ptr())
+            .unwrap_or(ptr::null())
+    }
+
+    /// Detect which of the 6 UI provider types is currently written in config.json.
+    #[unsafe(no_mangle)]
+    pub extern "C" fn amadeus_native_provider_active_type_index() -> i32 {
+        let root_path = match workspace_root() {
+            Some(p) => p,
+            None => return 0,
+        };
+        let json = read_config_json(&root_path);
+
+        let local_llm = json
+            .get("services")
+            .and_then(|s| s.get("localLlm"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        if local_llm {
+            // Amadeus vs Llama.cpp: check if path matches the built-in model.
+            let model_path = json
+                .get("services")
+                .and_then(|s| s.get("localLlmModelPath"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if model_path.contains("Qwen3-4B-q8_0") {
+                return 6; // Amadeus
+            }
+            return 5; // generic Llama.cpp
+        }
+
+        let provider_str = json
+            .get("provider")
+            .and_then(|v| v.as_str())
+            .unwrap_or("openai-chat");
+
+        match crate::agent::config::LlmProvider::parse(provider_str)
+            .unwrap_or(crate::agent::config::LlmProvider::OpenAiChat)
+        {
+            crate::agent::config::LlmProvider::Anthropic => 0,
+            crate::agent::config::LlmProvider::OpenAiChat
+            | crate::agent::config::LlmProvider::OpenAiResponses => {
+                // Distinguish OpenAI from OpenAI-compatible by checking if the endpoint
+                // differs from the official OpenAI base.
+                let api_base = json.get("apiBase").and_then(|v| v.as_str()).unwrap_or("");
+                if api_base.is_empty() || api_base == "https://api.openai.com/v1" {
+                    1 // OpenAI
+                } else {
+                    3 // OpenAI-compatible
+                }
+            }
+            crate::agent::config::LlmProvider::Gemini => 2,
+            crate::agent::config::LlmProvider::Ollama => 4,
+            crate::agent::config::LlmProvider::LlamaCpp => 5,
+        }
+    }
+
+    /// Return the current `model` value from config (slot 0).
+    #[unsafe(no_mangle)]
+    pub extern "C" fn amadeus_native_provider_current_model() -> *const c_char {
+        let value = workspace_root()
+            .and_then(|r| read_config_top_key(&r, "model"))
+            .unwrap_or_default();
+        store_provider_field(0, &value)
+    }
+
+    /// Return the current `apiBase` value from config (slot 1).
+    #[unsafe(no_mangle)]
+    pub extern "C" fn amadeus_native_provider_current_endpoint() -> *const c_char {
+        let value = workspace_root()
+            .and_then(|r| read_config_top_key(&r, "apiBase"))
+            .unwrap_or_default();
+        store_provider_field(1, &value)
+    }
+
+    /// Return the current `apiKey` value from config (slot 2).
+    #[unsafe(no_mangle)]
+    pub extern "C" fn amadeus_native_provider_current_apikey() -> *const c_char {
+        let value = workspace_root()
+            .and_then(|r| read_config_top_key(&r, "apiKey"))
+            .unwrap_or_default();
+        store_provider_field(2, &value)
+    }
+
+    /// Return the current `services.localLlmModelPath` from config (slot 3).
+    #[unsafe(no_mangle)]
+    pub extern "C" fn amadeus_native_provider_current_model_path() -> *const c_char {
+        let value = workspace_root()
+            .map(|r| read_config_json(&r))
+            .and_then(|json| {
+                json.get("services")?
+                    .get("localLlmModelPath")?
+                    .as_str()
+                    .map(|s| s.to_string())
+            })
+            .unwrap_or_default();
+        store_provider_field(3, &value)
+    }
+
+    /// Write a complete provider configuration to config.json.
+    ///
+    /// - `type_index`: 0=Anthropic 1=OpenAI 2=Gemini 3=OpenAI-compat 4=Llama.cpp 5=Amadeus
+    /// - `model`:    model name (or .gguf path for Llama.cpp); pass empty for Amadeus
+    /// - `endpoint`: API base URL (used for type 3 and optionally others); pass empty to keep default
+    /// - `api_key`:  API key; pass empty to leave unchanged
+    #[unsafe(no_mangle)]
+    pub extern "C" fn amadeus_native_provider_set_config(
+        type_index: i32,
+        model: *const c_char,
+        endpoint: *const c_char,
+        api_key: *const c_char,
+    ) {
+        let result = (|| -> Result<()> {
+            let root_path = workspace_root().context("runtime not initialised")?;
+            let config_path = root_path.join(crate::agent::config::DEFAULT_CONFIG_PATH);
+            let mut json = load_or_create_config_json(&config_path)?;
+            let root = json
+                .as_object_mut()
+                .context("config.json must be a JSON object")?;
+
+            let model_str = unsafe { cstr_to_string(model) };
+            let endpoint_str = unsafe { cstr_to_string(endpoint) };
+            let api_key_str = unsafe { cstr_to_string(api_key) };
+
+            match type_index {
+                // ── Anthropic ──────────────────────────────────────────────────
+                0 => {
+                    root.insert("provider".into(), Value::String("anthropic".into()));
+                    set_services_key(root, "localLlm", Value::Bool(false));
+                    root.remove("apiBase");
+                    if !model_str.is_empty() {
+                        root.insert("model".into(), Value::String(model_str));
+                    }
+                    if !api_key_str.is_empty() {
+                        root.insert("apiKey".into(), Value::String(api_key_str));
+                    }
+                }
+                // ── OpenAI ────────────────────────────────────────────────────
+                1 => {
+                    root.insert("provider".into(), Value::String("openai-chat".into()));
+                    set_services_key(root, "localLlm", Value::Bool(false));
+                    root.insert(
+                        "apiBase".into(),
+                        Value::String("https://api.openai.com/v1".into()),
+                    );
+                    if !model_str.is_empty() {
+                        root.insert("model".into(), Value::String(model_str));
+                    }
+                    if !api_key_str.is_empty() {
+                        root.insert("apiKey".into(), Value::String(api_key_str));
+                    }
+                }
+                // ── Gemini ────────────────────────────────────────────────────
+                2 => {
+                    root.insert("provider".into(), Value::String("gemini".into()));
+                    set_services_key(root, "localLlm", Value::Bool(false));
+                    root.remove("apiBase");
+                    if !model_str.is_empty() {
+                        root.insert("model".into(), Value::String(model_str));
+                    }
+                    if !api_key_str.is_empty() {
+                        root.insert("apiKey".into(), Value::String(api_key_str));
+                    }
+                }
+                // ── OpenAI-compatible ─────────────────────────────────────────
+                3 => {
+                    root.insert("provider".into(), Value::String("openai-chat".into()));
+                    set_services_key(root, "localLlm", Value::Bool(false));
+                    if !endpoint_str.is_empty() {
+                        root.insert("apiBase".into(), Value::String(endpoint_str));
+                    }
+                    if !model_str.is_empty() {
+                        root.insert("model".into(), Value::String(model_str));
+                    }
+                    if !api_key_str.is_empty() {
+                        root.insert("apiKey".into(), Value::String(api_key_str));
+                    }
+                }
+                // ── Ollama ────────────────────────────────────────────────────
+                4 => {
+                    root.insert("provider".into(), Value::String("ollama".into()));
+                    set_services_key(root, "localLlm", Value::Bool(false));
+                    let base = if endpoint_str.is_empty() {
+                        "http://127.0.0.1:11434".to_string()
+                    } else {
+                        endpoint_str
+                    };
+                    root.insert("apiBase".into(), Value::String(base));
+                    if !model_str.is_empty() {
+                        root.insert("model".into(), Value::String(model_str));
+                    }
+                    root.remove("apiKey");
+                }
+                // ── Llama.cpp (user-supplied path) ────────────────────────────
+                5 => {
+                    root.insert("provider".into(), Value::String("llama-cpp".into()));
+                    set_services_key(root, "localLlm", Value::Bool(true));
+                    root.remove("model");
+                    root.remove("apiBase");
+                    root.remove("apiKey");
+                    if !model_str.is_empty() {
+                        set_services_key(root, "localLlmModelPath", Value::String(model_str));
+                    }
+                }
+                // ── Amadeus built-in (Qwen3-4B-q8_0) ─────────────────────────
+                6 => {
+                    root.insert("provider".into(), Value::String("llama-cpp".into()));
+                    set_services_key(root, "localLlm", Value::Bool(true));
+                    set_services_key(
+                        root,
+                        "localLlmModelPath",
+                        Value::String(AMADEUS_BUILTIN_MODEL_PATH.into()),
+                    );
+                    root.remove("model");
+                    root.remove("apiBase");
+                    root.remove("apiKey");
+                }
+                _ => {}
+            }
+
+            let pretty =
+                serde_json::to_string_pretty(&json).context("failed to serialise config.json")?;
+            fs::write(&config_path, pretty + "\n")
+                .with_context(|| format!("failed to write {}", config_path.display()))?;
+
+            if let Some(rt) = native_ui_runtime() {
+                let mut guard = rt
+                    .agent_service
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("agent service mutex poisoned"))?;
+                if let Some(service) = guard.as_ref() {
+                    // Service already exists — just reload config in place.
+                    service.reload_config();
+                } else {
+                    // Service was not initialized (e.g. first-time config save) — build it now.
+                    let workspace_root = rt.workspace_root.clone();
+                    if let Ok(mut runtime_cfg) =
+                        AgentRuntimeConfig::load(Some(workspace_root), None)
+                    {
+                        if runtime_cfg.services.local_llm {
+                            runtime_cfg.provider = crate::agent::config::LlmProvider::LlamaCpp;
+                        }
+                        runtime_cfg.normalize_provider_defaults();
+                        if runtime_cfg.model.is_some() || runtime_cfg.services.local_llm {
+                            *guard = Some(Arc::new(AgentUiService::new(runtime_cfg)));
+                        }
+                    }
+                }
+            }
+            Ok(())
+        })();
+
+        if let Err(e) = result {
+            set_native_error(e.to_string());
+        }
+    }
+
+    /// `1` while the model is inside a `<think>…</think>` block, `0` otherwise.
+    /// Used by the overlay to drive future "thinking" animation states.
+    #[unsafe(no_mangle)]
+    pub extern "C" fn amadeus_native_llm_thinking() -> i32 {
+        #[cfg(feature = "local-llm")]
+        {
+            i32::from(crate::agent::llm::llama_cpp::is_thinking())
+        }
+        #[cfg(not(feature = "local-llm"))]
+        { 0 }
+    }
+
+    /// `1` while the local LLM background preload thread is still running (model not yet
+    /// fully loaded), `0` once the model is ready (or if no local LLM is used).
+    /// Used by the overlay to show a "Loading model..." badge.
+    #[unsafe(no_mangle)]
+    pub extern "C" fn amadeus_native_llm_loading() -> i32 {
+        let ready = native_ui_runtime()
+            .and_then(|rt| rt.agent_service.lock().ok())
+            .and_then(|guard| guard.as_ref().map(|svc| svc.is_model_ready()))
+            .unwrap_or(true);
+        i32::from(!ready)
+    }
+
+    /// Convert a nullable C string pointer to an owned Rust String (empty if null).
+    unsafe fn cstr_to_string(ptr: *const c_char) -> String {
+        if ptr.is_null() {
+            return String::new();
+        }
+        unsafe { CStr::from_ptr(ptr) }
+            .to_string_lossy()
+            .trim()
+            .to_string()
+    }
+
+    // ── Ollama model-list bridge ───────────────────────────────────────────────
+
+    /// Kick off a background fetch of `GET <endpoint>/api/tags`.
+    /// Status transitions: 0 (idle) → 1 (fetching) → 2 (done) | 3 (error).
+    #[unsafe(no_mangle)]
+    pub extern "C" fn amadeus_native_ollama_fetch_models(endpoint: *const c_char) {
+        let base = unsafe { cstr_to_string(endpoint) };
+        let base = if base.is_empty() {
+            "http://127.0.0.1:11434".to_string()
+        } else {
+            base.trim_end_matches('/').to_string()
+        };
+
+        NATIVE_OLLAMA_FETCH_STATUS.store(1, Ordering::Relaxed);
+
+        thread::Builder::new()
+            .name("amadeus-ollama-fetch".into())
+            .spawn(move || {
+                let url = format!("{base}/api/tags");
+                let result = reqwest::blocking::Client::builder()
+                    .timeout(std::time::Duration::from_secs(8))
+                    .build()
+                    .and_then(|c| c.get(&url).send())
+                    .and_then(|r| r.json::<serde_json::Value>());
+
+                match result {
+                    Ok(json) => {
+                        let names: Vec<CString> = json["models"]
+                            .as_array()
+                            .iter()
+                            .flat_map(|arr| arr.iter())
+                            .filter_map(|m| m["name"].as_str())
+                            .map(|s| sanitize_c_string(s))
+                            .collect();
+                        *native_ollama_models().lock().unwrap() = names;
+                        NATIVE_OLLAMA_FETCH_STATUS.store(2, Ordering::Relaxed);
+                    }
+                    Err(e) => {
+                        eprintln!("[amadeus] ollama fetch failed: {e}");
+                        NATIVE_OLLAMA_FETCH_STATUS.store(3, Ordering::Relaxed);
+                    }
+                }
+            })
+            .ok();
+    }
+
+    /// 0=idle  1=fetching  2=done  3=error
+    #[unsafe(no_mangle)]
+    pub extern "C" fn amadeus_native_ollama_fetch_status() -> i32 {
+        NATIVE_OLLAMA_FETCH_STATUS.load(Ordering::Relaxed)
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn amadeus_native_ollama_model_count() -> i32 {
+        native_ollama_models()
+            .lock()
+            .map(|g| g.len() as i32)
+            .unwrap_or(0)
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn amadeus_native_ollama_model_at(index: i32) -> *const c_char {
+        native_ollama_models()
+            .lock()
+            .ok()
+            .and_then(|g| g.get(index as usize).map(|cs| cs.as_ptr()))
+            .unwrap_or(ptr::null())
+    }
+
+    /// Find the index of `model_name` in the fetched list, or -1 if not found.
+    #[unsafe(no_mangle)]
+    pub extern "C" fn amadeus_native_ollama_model_index(model_name: *const c_char) -> i32 {
+        let name = unsafe { cstr_to_string(model_name) };
+        if name.is_empty() {
+            return 0;
+        }
+        native_ollama_models()
+            .lock()
+            .ok()
+            .and_then(|g| {
+                g.iter()
+                    .position(|cs| cs.to_string_lossy() == name.as_str())
+                    .map(|i| i as i32)
+            })
+            .unwrap_or(0)
+    }
+
+    // ── GGUF model download bridge ─────────────────────────────────────────────
+
+    // 0=idle  1=downloading  2=done  3=error
+    static NATIVE_GGUF_DOWNLOAD_STATUS: AtomicI32 = AtomicI32::new(0);
+    // 0–100
+    static NATIVE_GGUF_DOWNLOAD_PROGRESS: AtomicI32 = AtomicI32::new(0);
+
+    const GGUF_HF_URL: &str =
+        "https://huggingface.co/Qwen/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q8_0.gguf";
+
+    /// Returns the resolved model path for type 5 or 6, or None for other types.
+    fn gguf_model_path_for_type(type_index: i32) -> Option<PathBuf> {
+        match type_index {
+            5 => workspace_root().map(|r| {
+                let json = read_config_json(&r);
+                let path_str = json
+                    .get("services")
+                    .and_then(|s| s.get("localLlmModelPath"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if path_str.is_empty() {
+                    PathBuf::new()
+                } else {
+                    PathBuf::from(path_str)
+                }
+            }),
+            6 => workspace_root().map(|r| r.join(AMADEUS_BUILTIN_MODEL_PATH)),
+            _ => None,
+        }
+    }
+
+    /// Returns 1 if the model file for the given provider type exists on disk, 0 otherwise.
+    /// Only meaningful for types 5 (Llama.cpp) and 6 (Amadeus built-in).
+    #[unsafe(no_mangle)]
+    pub extern "C" fn amadeus_native_gguf_model_exists(type_index: i32) -> i32 {
+        gguf_model_path_for_type(type_index)
+            .map(|p| {
+                if !p.as_os_str().is_empty() && p.exists() {
+                    1
+                } else {
+                    0
+                }
+            })
+            .unwrap_or(0)
+    }
+
+    /// Kick off a background download of the GGUF model for the given provider type.
+    /// Only types 5 and 6 are supported. For type 6 the path is hardcoded;
+    /// for type 5 the path is read from the current config.
+    /// Status: 0=idle → 1=downloading → 2=done | 3=error.
+    #[unsafe(no_mangle)]
+    pub extern "C" fn amadeus_native_gguf_download_start(type_index: i32) {
+        let dest = match gguf_model_path_for_type(type_index) {
+            Some(p) if !p.as_os_str().is_empty() => p,
+            _ => return,
+        };
+
+        // Don't start a new download if one is already running.
+        if NATIVE_GGUF_DOWNLOAD_STATUS.load(Ordering::Relaxed) == 1 {
+            return;
+        }
+
+        NATIVE_GGUF_DOWNLOAD_STATUS.store(1, Ordering::Relaxed);
+        NATIVE_GGUF_DOWNLOAD_PROGRESS.store(0, Ordering::Relaxed);
+
+        thread::Builder::new()
+            .name("amadeus-gguf-download".into())
+            .spawn(move || {
+                use std::io::{Read, Write};
+
+                if let Some(parent) = dest.parent() {
+                    if let Err(e) = std::fs::create_dir_all(parent) {
+                        eprintln!("[amadeus] gguf download: failed to create dir: {e}");
+                        NATIVE_GGUF_DOWNLOAD_STATUS.store(3, Ordering::Relaxed);
+                        return;
+                    }
+                }
+
+                let part_path = dest.with_extension("gguf.part");
+
+                let mut response = match reqwest::blocking::Client::builder()
+                    .build()
+                    .and_then(|c| c.get(GGUF_HF_URL).send())
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        eprintln!("[amadeus] gguf download request failed: {e}");
+                        NATIVE_GGUF_DOWNLOAD_STATUS.store(3, Ordering::Relaxed);
+                        return;
+                    }
+                };
+
+                if !response.status().is_success() {
+                    eprintln!("[amadeus] gguf download: HTTP {}", response.status());
+                    NATIVE_GGUF_DOWNLOAD_STATUS.store(3, Ordering::Relaxed);
+                    return;
+                }
+
+                let total = response.content_length();
+
+                let mut file = match std::fs::File::create(&part_path) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        eprintln!("[amadeus] gguf download: failed to create temp file: {e}");
+                        NATIVE_GGUF_DOWNLOAD_STATUS.store(3, Ordering::Relaxed);
+                        return;
+                    }
+                };
+
+                let mut downloaded: u64 = 0;
+                let mut buf = vec![0u8; 1024 * 256];
+                loop {
+                    let n = match response.read(&mut buf) {
+                        Ok(n) => n,
+                        Err(e) => {
+                            eprintln!("[amadeus] gguf download read error: {e}");
+                            NATIVE_GGUF_DOWNLOAD_STATUS.store(3, Ordering::Relaxed);
+                            return;
+                        }
+                    };
+                    if n == 0 {
+                        break;
+                    }
+                    if let Err(e) = file.write_all(&buf[..n]) {
+                        eprintln!("[amadeus] gguf download write error: {e}");
+                        NATIVE_GGUF_DOWNLOAD_STATUS.store(3, Ordering::Relaxed);
+                        return;
+                    }
+                    downloaded += n as u64;
+                    if let Some(total) = total {
+                        let pct = (downloaded * 100 / total).min(99) as i32;
+                        NATIVE_GGUF_DOWNLOAD_PROGRESS.store(pct, Ordering::Relaxed);
+                    }
+                }
+
+                if let Err(e) = std::fs::rename(&part_path, &dest) {
+                    eprintln!("[amadeus] gguf download rename failed: {e}");
+                    NATIVE_GGUF_DOWNLOAD_STATUS.store(3, Ordering::Relaxed);
+                    return;
+                }
+
+                NATIVE_GGUF_DOWNLOAD_PROGRESS.store(100, Ordering::Relaxed);
+                NATIVE_GGUF_DOWNLOAD_STATUS.store(2, Ordering::Relaxed);
+                eprintln!("[amadeus] GGUF download complete: {}", dest.display());
+            })
+            .ok();
+    }
+
+    /// 0=idle  1=downloading  2=done  3=error
+    #[unsafe(no_mangle)]
+    pub extern "C" fn amadeus_native_gguf_download_status() -> i32 {
+        NATIVE_GGUF_DOWNLOAD_STATUS.load(Ordering::Relaxed)
+    }
+
+    /// 0–100 percent complete (only meaningful while status == 1).
+    #[unsafe(no_mangle)]
+    pub extern "C" fn amadeus_native_gguf_download_progress() -> i32 {
+        NATIVE_GGUF_DOWNLOAD_PROGRESS.load(Ordering::Relaxed)
+    }
+
+    // ── STT model download bridge ──────────────────────────────────────────────
+
+    // 0=idle  1=downloading  2=done  3=error
+    static NATIVE_STT_DOWNLOAD_STATUS: AtomicI32 = AtomicI32::new(0);
+    // 0–100
+    static NATIVE_STT_DOWNLOAD_PROGRESS: AtomicI32 = AtomicI32::new(0);
+
+    const STT_HF_URL: &str =
+        "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q8_0.bin";
+    const STT_MODEL_SUBPATH: &str = "models/stt/ggml-large-v3-turbo-q8_0.bin";
+
+    fn stt_model_path() -> Option<PathBuf> {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        Some(manifest_dir.join("assets").join(STT_MODEL_SUBPATH))
+    }
+
+    /// 1 if the STT model file exists on disk, 0 otherwise.
+    #[unsafe(no_mangle)]
+    pub extern "C" fn amadeus_native_stt_model_exists() -> i32 {
+        stt_model_path()
+            .map(|p| if p.exists() { 1 } else { 0 })
+            .unwrap_or(0)
+    }
+
+    /// Start a background download of the STT (Whisper) model if not already running.
+    #[unsafe(no_mangle)]
+    pub extern "C" fn amadeus_native_stt_download_start() {
+        let dest = match stt_model_path() {
+            Some(p) => p,
+            None => return,
+        };
+
+        if NATIVE_STT_DOWNLOAD_STATUS.load(Ordering::Relaxed) == 1 {
+            return;
+        }
+
+        NATIVE_STT_DOWNLOAD_STATUS.store(1, Ordering::Relaxed);
+        NATIVE_STT_DOWNLOAD_PROGRESS.store(0, Ordering::Relaxed);
+
+        thread::Builder::new()
+            .name("amadeus-stt-download".into())
+            .spawn(move || {
+                use std::io::{Read, Write};
+
+                if let Some(parent) = dest.parent() {
+                    if let Err(e) = std::fs::create_dir_all(parent) {
+                        eprintln!("[amadeus] stt download: failed to create dir: {e}");
+                        NATIVE_STT_DOWNLOAD_STATUS.store(3, Ordering::Relaxed);
+                        return;
+                    }
+                }
+
+                let part_path = dest.with_extension("bin.part");
+
+                let mut response = match reqwest::blocking::Client::builder()
+                    .build()
+                    .and_then(|c| c.get(STT_HF_URL).send())
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        eprintln!("[amadeus] stt download request failed: {e}");
+                        NATIVE_STT_DOWNLOAD_STATUS.store(3, Ordering::Relaxed);
+                        return;
+                    }
+                };
+
+                if !response.status().is_success() {
+                    eprintln!("[amadeus] stt download: HTTP {}", response.status());
+                    NATIVE_STT_DOWNLOAD_STATUS.store(3, Ordering::Relaxed);
+                    return;
+                }
+
+                let total = response.content_length();
+
+                let mut file = match std::fs::File::create(&part_path) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        eprintln!("[amadeus] stt download: failed to create temp file: {e}");
+                        NATIVE_STT_DOWNLOAD_STATUS.store(3, Ordering::Relaxed);
+                        return;
+                    }
+                };
+
+                let mut downloaded: u64 = 0;
+                let mut buf = vec![0u8; 1024 * 256];
+                loop {
+                    let n = match response.read(&mut buf) {
+                        Ok(n) => n,
+                        Err(e) => {
+                            eprintln!("[amadeus] stt download read error: {e}");
+                            NATIVE_STT_DOWNLOAD_STATUS.store(3, Ordering::Relaxed);
+                            return;
+                        }
+                    };
+                    if n == 0 {
+                        break;
+                    }
+                    if let Err(e) = file.write_all(&buf[..n]) {
+                        eprintln!("[amadeus] stt download write error: {e}");
+                        NATIVE_STT_DOWNLOAD_STATUS.store(3, Ordering::Relaxed);
+                        return;
+                    }
+                    downloaded += n as u64;
+                    if let Some(total) = total {
+                        let pct = (downloaded * 100 / total).min(99) as i32;
+                        NATIVE_STT_DOWNLOAD_PROGRESS.store(pct, Ordering::Relaxed);
+                    }
+                }
+
+                if let Err(e) = std::fs::rename(&part_path, &dest) {
+                    eprintln!("[amadeus] stt download rename failed: {e}");
+                    NATIVE_STT_DOWNLOAD_STATUS.store(3, Ordering::Relaxed);
+                    return;
+                }
+
+                NATIVE_STT_DOWNLOAD_PROGRESS.store(100, Ordering::Relaxed);
+                NATIVE_STT_DOWNLOAD_STATUS.store(2, Ordering::Relaxed);
+                eprintln!("[amadeus] STT download complete: {}", dest.display());
+            })
+            .ok();
+    }
+
+    /// 0=idle  1=downloading  2=done  3=error
+    #[unsafe(no_mangle)]
+    pub extern "C" fn amadeus_native_stt_download_status() -> i32 {
+        NATIVE_STT_DOWNLOAD_STATUS.load(Ordering::Relaxed)
+    }
+
+    /// 0–100 percent complete (only meaningful while status == 1).
+    #[unsafe(no_mangle)]
+    pub extern "C" fn amadeus_native_stt_download_progress() -> i32 {
+        NATIVE_STT_DOWNLOAD_PROGRESS.load(Ordering::Relaxed)
+    }
+
+    // ── TTS model status bridge ────────────────────────────────────────────────
+
+    /// Returns 1 if the TTS HuggingFace cache directory exists, 0 otherwise.
+    /// TTS downloads lazily on first synthesis; this just tells the boot screen
+    /// whether the cached weights are already present.
+    #[unsafe(no_mangle)]
+    pub extern "C" fn amadeus_native_tts_model_cached() -> i32 {
+        let cache_base = std::env::var("HF_HUB_CACHE")
+            .or_else(|_| std::env::var("HF_HOME").map(|h| format!("{h}/hub")))
+            .unwrap_or_else(|_| {
+                std::env::var("HOME")
+                    .map(|h| format!("{h}/.cache/huggingface/hub"))
+                    .unwrap_or_else(|_| ".cache/huggingface/hub".to_string())
+            });
+        let tts_dir = PathBuf::from(cache_base).join("models--Loke-60000--christina-TTS");
+        if tts_dir.exists() {
+            1
+        } else {
+            0
+        }
+    }
+
+    // ── Pre-flight: start downloads before the boot screen ────────────────────
+
+    /// Start all required model downloads that are missing, before the boot sequence
+    /// renders. The C++ `RunModelLoadingPhase()` polls the status atomics to show progress.
+    fn preflight_model_downloads(assets_root: &Path) {
+        let _ = assets_root; // used indirectly via stt_model_path()
+
+        // LLM: only download the Amadeus built-in if it's the configured provider.
+        if amadeus_native_provider_active_type_index() == 6
+            && amadeus_native_gguf_model_exists(6) == 0
+        {
+            amadeus_native_gguf_download_start(6);
+        } else if amadeus_native_gguf_model_exists(6) == 1 {
+            // Model already present — mark done so the boot bar shows Ready immediately.
+            NATIVE_GGUF_DOWNLOAD_STATUS.store(2, Ordering::Relaxed);
+            NATIVE_GGUF_DOWNLOAD_PROGRESS.store(100, Ordering::Relaxed);
+        }
+
+        // STT: download if missing (it's needed regardless of which LLM provider is used).
+        if amadeus_native_stt_model_exists() == 0 {
+            amadeus_native_stt_download_start();
+        } else {
+            NATIVE_STT_DOWNLOAD_STATUS.store(2, Ordering::Relaxed);
+            NATIVE_STT_DOWNLOAD_PROGRESS.store(100, Ordering::Relaxed);
+        }
+    }
+
+    // ── Post-boot service initialization ──────────────────────────────────────
+
+    /// Called by C++ (cubism_bridge.cpp) after `RunModelLoadingPhase()` completes.
+    /// Initialises TTS, STT, and the agent service — the heavy work that previously
+    /// blocked the app before any window appeared.
+    #[unsafe(no_mangle)]
+    pub extern "C" fn amadeus_native_init_services() {
+        let workspace_root = match NATIVE_WORKSPACE_ROOT.get() {
+            Some(p) => p.clone(),
+            None => {
+                eprintln!("[amadeus] amadeus_native_init_services: workspace root not set");
+                return;
+            }
+        };
+        initialize_native_ui_runtime(&workspace_root);
+    }
+
     mod tests {
         use std::time::Duration;
 
         use super::{
-            VOICE_HARD_GAP_MS, VOICE_SOFT_GAP_MS, collect_primeable_tts_segments,
-            last_spoken_boundary_char, lip_sync_target_from_samples, normalize_lip_sync_rms,
-            segment_pause_duration, should_prebuffer_mixed_language_segment,
-            should_use_non_streaming_voice_path,
+            collect_primeable_tts_segments, last_spoken_boundary_char,
+            lip_sync_target_from_samples, normalize_lip_sync_rms, segment_pause_duration,
+            should_prebuffer_mixed_language_segment, should_use_non_streaming_voice_path,
+            VOICE_HARD_GAP_MS, VOICE_SOFT_GAP_MS,
         };
 
         #[test]
@@ -1969,7 +3041,7 @@ mod imp {
 
 #[cfg(not(target_os = "linux"))]
 mod imp {
-    use anyhow::{Result, bail};
+    use anyhow::{bail, Result};
 
     pub fn run_native_viewer() -> Result<()> {
         bail!("the native Cubism viewer is currently wired up only for Linux")

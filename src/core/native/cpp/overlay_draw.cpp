@@ -273,12 +273,12 @@ void AmadeusOverlay::DrawSettingsPanel(
     const float label_w = panel_w * 0.40f;  // 40% for label, 60% for value
     const float header_h = line_h + 36.0f;
 
-    // Row count: 0=Mode, 1=Voice Language, [2=Sensitivity, 3=Device, 4=Gain, 5=Gate, 6=Compressor] (stt only), last=Agent Info
+    // Row count: 0=Mode, 1=Voice Language, 2=Provider
+    //            [3=Sensitivity, 4=Device, 5=Gain, 6=Gate, 7=Compressor] (stt only)
     // When STT: extra row_h for the level meter below the device row
-    const int num_setting_rows = snapshot.stt_enabled ? 7 : 2;
-    const int total_rows = num_setting_rows + 1; // +1 for read-only agent info
+    const int num_setting_rows = snapshot.stt_enabled ? 8 : 3;
     const float level_meter_extra = snapshot.stt_enabled ? row_h : 0.0f;
-    const float panel_h = header_h + pad_y + (total_rows * row_h) + level_meter_extra + pad_y;
+    const float panel_h = header_h + pad_y + (num_setting_rows * row_h) + level_meter_extra + pad_y;
 
     const float x = (window_width - panel_w) * 0.5f;
     const float y = (window_height - panel_h) * 0.38f;
@@ -358,7 +358,20 @@ void AmadeusOverlay::DrawSettingsPanel(
     }
     draw_row(1, "Voice Language", lang_val, false);
 
-    // Row 2: Mic Sensitivity (only when STT available)
+    // Row 2: Provider — left/right opens the provider sub-panel
+    {
+        const std::string model_hint = snapshot.sub_field_model.empty()
+            ? "" : "  /  " + snapshot.sub_field_model;
+        std::string prov_val = snapshot.provider_sub_type_name.empty()
+            ? "Configure..."
+            : snapshot.provider_sub_type_name + model_hint;
+        if (snapshot.llm_loading) {
+            prov_val += "  (loading model...)";
+        }
+        draw_row(2, "Provider", prov_val, false);
+    }
+
+    // Row 3: Mic Sensitivity (only when STT available)
     if (snapshot.stt_enabled) {
         std::string sens_val;
         switch (snapshot.stt_sensitivity) {
@@ -366,9 +379,9 @@ void AmadeusOverlay::DrawSettingsPanel(
             case VadSensitivity::High: sens_val = "High";   break;
             default:                   sens_val = "Medium"; break;
         }
-        draw_row(2, "Mic Sensitivity", sens_val, false);
+        draw_row(3, "Mic Sensitivity", sens_val, false);
 
-        // Row 3: Mic Device
+        // Row 4: Mic Device
         std::string device_val = snapshot.stt_device_name.empty()
             ? "Default"
             : snapshot.stt_device_name;
@@ -385,7 +398,7 @@ void AmadeusOverlay::DrawSettingsPanel(
             // Break after one truncation attempt to avoid infinite loop
             break;
         }
-        draw_row(3, "Mic Device", device_val, false);
+        draw_row(4, "Mic Device", device_val, false);
 
         // Mic level meter — drawn below the device row
         {
@@ -420,31 +433,28 @@ void AmadeusOverlay::DrawSettingsPanel(
             row_y += row_h;
         }
 
-        // Row 4: Mic Gain
+        // Row 5: Mic Gain
         {
             const int gain_db = (snapshot.mic_gain_step - 4) * 3;
             std::string gain_val;
             if (gain_db > 0)       gain_val = "+" + std::to_string(gain_db) + " dB";
             else if (gain_db == 0) gain_val = "0 dB";
             else                   gain_val = std::to_string(gain_db) + " dB";
-            draw_row(4, "Mic Gain", gain_val, false);
+            draw_row(5, "Mic Gain", gain_val, false);
         }
 
-        // Row 5: Noise Gate
+        // Row 6: Noise Gate
         {
             const char* gate_labels[] = { "Off", "Low", "Medium", "High" };
-            draw_row(5, "Noise Gate", gate_labels[snapshot.mic_gate_step], false);
+            draw_row(6, "Noise Gate", gate_labels[snapshot.mic_gate_step], false);
         }
 
-        // Row 6: Compressor
+        // Row 7: Compressor
         {
             const char* comp_labels[] = { "Off", "Light", "Medium", "Heavy" };
-            draw_row(6, "Compressor", comp_labels[snapshot.mic_comp_step], false);
+            draw_row(7, "Compressor", comp_labels[snapshot.mic_comp_step], false);
         }
     }
-
-    // Agent info (read-only)
-    draw_row(num_setting_rows, "Agent", snapshot.runtime_info, true);
 
     // STT state badge when speech mode is active
     if (snapshot.stt_enabled && snapshot.app_mode == AppMode::SpeechToSpeech) {
@@ -457,6 +467,229 @@ void AmadeusOverlay::DrawSettingsPanel(
             default: badge = "  Mic standby";                                         break;
         }
         text_renderer.DrawText(x + pad_x, y + panel_h - line_h - 10.0f, badge, br, bg, bb, 0.92f);
+    }
+
+    // Provider sub-panel — drawn as a second panel to the right of the main one
+    if (snapshot.provider_sub_open) {
+        // Determine how many text rows the current provider has.
+        // type 0,1,2 (Anthropic/OpenAI/Gemini): model + api_key
+        // type 3 (OpenAI-compat): model + endpoint + api_key
+        // type 4 (Ollama): endpoint + model (cycle)
+        // type 5 (Llama.cpp): model_path + download status
+        // type 6 (Amadeus built-in): download status
+        struct SubRow {
+            std::string label;
+            std::string value;
+            bool is_cycle;   // arrows change value (no text edit)
+            bool read_only;  // purely informational
+        };
+        std::vector<SubRow> rows;
+        // Row 0: provider type (cycle with arrows)
+        rows.push_back({"Provider",
+            snapshot.provider_sub_type_name.empty() ? "Unknown" : snapshot.provider_sub_type_name,
+            /*is_cycle=*/true, /*read_only=*/false});
+
+        switch (snapshot.provider_sub_type_idx) {
+        case 0: case 1: case 2:  // Anthropic / OpenAI / Gemini
+            rows.push_back({"Model",   snapshot.sub_field_model,  false, false});
+            rows.push_back({"API Key", snapshot.sub_field_apikey, false, false});
+            break;
+        case 3:  // OpenAI-compatible
+            rows.push_back({"Model",    snapshot.sub_field_model,    false, false});
+            rows.push_back({"Endpoint", snapshot.sub_field_endpoint, false, false});
+            rows.push_back({"API Key",  snapshot.sub_field_apikey,   false, false});
+            break;
+        case 4: {  // Ollama
+            rows.push_back({"Endpoint", snapshot.sub_field_endpoint.empty()
+                ? "http://127.0.0.1:11434" : snapshot.sub_field_endpoint, false, false});
+            // Model row: cycle from fetched list
+            std::string model_val;
+            if (snapshot.ollama_fetch_status == 1) {
+                model_val = "Fetching models...";
+            } else if (snapshot.ollama_fetch_status == 3) {
+                model_val = "Error — check endpoint";
+            } else if (snapshot.ollama_model_count == 0) {
+                model_val = "No models — confirm endpoint";
+            } else {
+                model_val = snapshot.ollama_model_name.empty()
+                    ? "Unknown" : snapshot.ollama_model_name;
+            }
+            const bool model_cycle = (snapshot.ollama_fetch_status == 2
+                                      && snapshot.ollama_model_count > 0);
+            rows.push_back({"Model", model_val, model_cycle, !model_cycle});
+            break;
+        }
+        case 5:  // Llama.cpp
+            rows.push_back({"Model Path", snapshot.sub_field_model, false, false});
+            {
+                std::string dl_val;
+                bool dl_read_only = true;
+                if (snapshot.gguf_model_exists) {
+                    dl_val = "Model ready";
+                } else if (snapshot.gguf_download_status == 1) {
+                    dl_val = "Downloading... " + std::to_string(snapshot.gguf_download_progress) + "%";
+                } else if (snapshot.gguf_download_status == 3) {
+                    dl_val = "Download failed — Enter to retry";
+                    dl_read_only = false;
+                } else {
+                    dl_val = "Not downloaded — Enter to download";
+                    dl_read_only = false;
+                }
+                rows.push_back({"Model File", dl_val, false, dl_read_only});
+            }
+            break;
+        case 6:  // Amadeus built-in
+            {
+                std::string dl_val;
+                bool dl_read_only = true;
+                if (snapshot.gguf_model_exists) {
+                    dl_val = "Model ready";
+                } else if (snapshot.gguf_download_status == 1) {
+                    dl_val = "Downloading... " + std::to_string(snapshot.gguf_download_progress) + "%";
+                } else if (snapshot.gguf_download_status == 3) {
+                    dl_val = "Download failed — Enter to retry";
+                    dl_read_only = false;
+                } else {
+                    dl_val = "Not downloaded — Enter to download";
+                    dl_read_only = false;
+                }
+                rows.push_back({"Model File", dl_val, false, dl_read_only});
+            }
+            break;
+        default: break;
+        }
+        // Save row: always last
+        rows.push_back({"", "SAVE", /*is_cycle=*/false, /*read_only=*/false});
+
+        const int num_sub_rows = static_cast<int>(rows.size());
+        const float sub_w = std::min(580.0f, static_cast<float>(window_width) * 0.46f);
+        constexpr float sub_pad_x = 28.0f;
+        constexpr float sub_pad_y = 24.0f;
+        const float sub_row_h = row_h;
+        const float sub_header_h = line_h + 32.0f;
+        const float sub_panel_h =
+            sub_header_h + sub_pad_y + num_sub_rows * sub_row_h + sub_pad_y;
+        const float sub_x = std::min(
+            static_cast<float>(window_width) - sub_w - 12.0f,
+            x + panel_w + 12.0f);
+        const float sub_y = y;
+
+        DrawFilledRect(sub_x, sub_y, sub_w, sub_panel_h, 0.04f, 0.07f, 0.10f, 0.97f);
+
+        // Title
+        text_renderer.DrawText(sub_x + sub_pad_x, sub_y + sub_pad_y,
+                               "PROVIDER CONFIG", 0.95f, 0.97f, 1.0f, 1.0f);
+        const std::string sub_hint = snapshot.sub_editing
+            ? "Enter confirm    Esc cancel"
+            : "Enter edit / save    Esc close";
+        const float sub_hint_w = static_cast<float>(text_renderer.MeasureTextWidth(sub_hint));
+        text_renderer.DrawText(sub_x + sub_w - sub_pad_x - sub_hint_w,
+                               sub_y + sub_pad_y, sub_hint, 0.42f, 0.52f, 0.58f, 1.0f);
+
+        DrawFilledRect(sub_x + sub_pad_x, sub_y + sub_header_h - 4.0f,
+                       sub_w - sub_pad_x * 2.0f, 1.0f, 0.20f, 0.30f, 0.38f, 0.70f);
+
+        float sub_row_y = sub_y + sub_header_h + sub_pad_y * 0.5f;
+        const float sub_label_w = sub_w * 0.35f;
+        const float val_area_w = sub_w - sub_pad_x - sub_label_w - sub_pad_x;
+
+        for (int ri = 0; ri < num_sub_rows; ++ri) {
+            const SubRow& sr = rows[static_cast<std::size_t>(ri)];
+            const bool sel = (ri == snapshot.provider_sub_row);
+            const bool editing = sel && snapshot.sub_editing && !sr.is_cycle && !sr.read_only;
+            const bool is_save_row = sr.label.empty() && sr.value == "SAVE";
+
+            if (is_save_row) {
+                // Save row: distinct accent highlight
+                const float bg_r = sel ? 0.10f : 0.06f;
+                const float bg_g = sel ? 0.32f : 0.20f;
+                const float bg_b = sel ? 0.18f : 0.10f;
+                DrawFilledRect(sub_x + 6.0f, sub_row_y - 4.0f,
+                               sub_w - 12.0f, sub_row_h - 2.0f,
+                               bg_r, bg_g, bg_b, 0.92f);
+                const float text_y = sub_row_y + (sub_row_h - line_h) * 0.5f - 2.0f;
+                const float save_w = static_cast<float>(text_renderer.MeasureTextWidth("SAVE"));
+                text_renderer.DrawText(sub_x + (sub_w - save_w) * 0.5f, text_y, "SAVE",
+                                       sel ? 0.40f : 0.30f,
+                                       sel ? 0.96f : 0.68f,
+                                       sel ? 0.58f : 0.40f,
+                                       sel ? 1.0f  : 0.75f);
+                sub_row_y += sub_row_h;
+                continue;
+            }
+
+            if (sel && !sr.read_only) {
+                const float bg_r = editing ? 0.08f : 0.10f;
+                const float bg_g = editing ? 0.18f : 0.22f;
+                const float bg_b = editing ? 0.28f : 0.32f;
+                DrawFilledRect(sub_x + 6.0f, sub_row_y - 4.0f,
+                               sub_w - 12.0f, sub_row_h - 2.0f,
+                               bg_r, bg_g, bg_b, 0.90f);
+            }
+
+            const float text_y = sub_row_y + (sub_row_h - line_h) * 0.5f - 2.0f;
+            const float la = (sr.read_only) ? 0.55f : (sel ? 1.0f : 0.80f);
+            text_renderer.DrawText(sub_x + sub_pad_x, text_y, sr.label,
+                                   0.75f, 0.82f, 0.88f, la);
+
+            const float val_x = sub_x + sub_pad_x + sub_label_w;
+
+            if (sr.is_cycle) {
+                const float aa = sel ? 0.85f : 0.35f;
+                text_renderer.DrawText(val_x, text_y, "<  ",
+                                       0.55f, 0.68f, 0.75f, aa);
+                const float lw =
+                    static_cast<float>(text_renderer.MeasureTextWidth("<  "));
+                text_renderer.DrawText(val_x + lw, text_y, sr.value,
+                                       0.96f, 0.98f, 1.0f, 1.0f);
+                const float vw =
+                    static_cast<float>(text_renderer.MeasureTextWidth(sr.value));
+                text_renderer.DrawText(val_x + lw + vw, text_y, "  >",
+                                       0.55f, 0.68f, 0.75f, aa);
+            } else if (sr.read_only) {
+                text_renderer.DrawText(val_x, text_y, sr.value,
+                                       0.68f, 0.74f, 0.82f, 0.65f);
+            } else if (editing) {
+                // Active text input: show buffer with cursor, clip from left if too wide.
+                const std::string buf = snapshot.sub_edit_buffer + "|";
+                std::string visible_buf = buf;
+                while (!visible_buf.empty() &&
+                       static_cast<float>(text_renderer.MeasureTextWidth(visible_buf)) > val_area_w) {
+                    std::size_t i = 1;
+                    while (i < visible_buf.size() &&
+                           (static_cast<unsigned char>(visible_buf[i]) & 0xC0u) == 0x80u) {
+                        ++i;
+                    }
+                    visible_buf = visible_buf.substr(i);
+                }
+                text_renderer.DrawText(val_x, text_y, visible_buf,
+                                       0.96f, 0.98f, 1.0f, 1.0f);
+            } else {
+                // Inactive editable field
+                std::string display = sr.value;
+                if (sr.label == "API Key" && !display.empty()) {
+                    display = "\xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2";
+                }
+                if (display.empty()) {
+                    display = sel ? "Press Enter to edit" : "(not set)";
+                }
+                // Truncate to fit
+                while (!display.empty() &&
+                       static_cast<float>(text_renderer.MeasureTextWidth(display)) > val_area_w) {
+                    std::size_t trim = display.size() - 1;
+                    while (trim > 0 &&
+                           (static_cast<unsigned char>(display[trim]) & 0xC0u) == 0x80u) {
+                        --trim;
+                    }
+                    display = display.substr(0, trim) + "..";
+                    break;
+                }
+                text_renderer.DrawText(val_x, text_y, display,
+                                       0.80f, 0.88f, 0.96f, sel ? 0.95f : 0.70f);
+            }
+
+            sub_row_y += sub_row_h;
+        }
     }
 }
 
@@ -550,5 +783,34 @@ void AmadeusOverlay::Render(const AmadeusTextRenderer& text_renderer, int window
     }
 
     DrawSettingsButton(text_renderer, window_width);
+
+    // Loading toast: shown in the top-right (below the settings button) while the local
+    // LLM preload thread is still running.
+    if (snapshot.llm_loading) {
+        const std::string msg = "Loading model...";
+        const float tw = static_cast<float>(text_renderer.MeasureTextWidth(msg));
+        const float lh = static_cast<float>(text_renderer.line_height());
+        const float pw = tw + 24.0f;
+        const float ph = lh + 14.0f;
+        const float px = window_width - pw - 16.0f;
+        const float py = 48.0f;  // just below the settings button
+        DrawFilledRect(px, py, pw, ph, 0.06f, 0.16f, 0.22f, 0.88f);
+        text_renderer.DrawText(px + 12.0f, py + 8.0f, msg, 0.55f, 0.80f, 0.95f, 1.0f);
+    }
+
+    // Thinking badge: amber indicator while the model is inside a <think> block.
+    // Reserved for future animation hookup; currently just a visual state marker.
+    if (snapshot.llm_thinking) {
+        const std::string msg = "Thinking...";
+        const float tw = static_cast<float>(text_renderer.MeasureTextWidth(msg));
+        const float lh = static_cast<float>(text_renderer.line_height());
+        const float pw = tw + 24.0f;
+        const float ph = lh + 14.0f;
+        const float px = window_width - pw - 16.0f;
+        const float py = snapshot.llm_loading ? 96.0f : 48.0f;
+        DrawFilledRect(px, py, pw, ph, 0.18f, 0.14f, 0.04f, 0.88f);
+        text_renderer.DrawText(px + 12.0f, py + 8.0f, msg, 0.95f, 0.78f, 0.30f, 1.0f);
+    }
+
     EndOverlay();
 }

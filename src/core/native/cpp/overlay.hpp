@@ -12,6 +12,32 @@ struct GLFWwindow;
 extern "C" void AmadeusOverlayNativeTextDelta(void* user_data, const char* delta);
 extern "C" void AmadeusOverlayNativeStreamEvent(void* user_data, int event_kind, const char* message);
 
+extern "C" {
+int amadeus_native_provider_type_count();
+const char* amadeus_native_provider_type_name(int index);
+int amadeus_native_provider_active_type_index();
+const char* amadeus_native_provider_current_model();
+const char* amadeus_native_provider_current_endpoint();
+const char* amadeus_native_provider_current_apikey();
+const char* amadeus_native_provider_current_model_path();
+void amadeus_native_provider_set_config(
+    int type_index,
+    const char* model,
+    const char* endpoint,
+    const char* api_key);
+// Ollama model list
+void amadeus_native_ollama_fetch_models(const char* endpoint);
+int  amadeus_native_ollama_fetch_status();
+int  amadeus_native_ollama_model_count();
+const char* amadeus_native_ollama_model_at(int index);
+int  amadeus_native_ollama_model_index(const char* model_name);
+// GGUF model download (types 5 = Llama.cpp, 6 = Amadeus built-in)
+int  amadeus_native_gguf_model_exists(int type_index);
+void amadeus_native_gguf_download_start(int type_index);
+int  amadeus_native_gguf_download_status();
+int  amadeus_native_gguf_download_progress();
+}
+
 enum class AppMode { Chat, SpeechToSpeech };
 enum class VoiceLang { Auto, English, Japanese };
 enum class VadSensitivity { Low, Medium, High };
@@ -44,6 +70,8 @@ private:
 
     struct Snapshot {
         bool agent_enabled = false;
+        bool llm_loading   = false;  // true while background model preload is in progress
+        bool llm_thinking  = false;  // true while model is inside <think>…</think>
         bool voice_enabled = false;
         bool stt_enabled = false;
         bool request_in_flight = false;
@@ -60,6 +88,30 @@ private:
         AppMode app_mode = AppMode::Chat;
         VoiceLang voice_lang = VoiceLang::Auto;
         VadSensitivity stt_sensitivity = VadSensitivity::Medium;
+        int  provider_count = 0;
+        int  provider_index = -1;
+        std::string provider_name;
+        // provider sub-panel
+        bool provider_sub_open = false;
+        int  provider_sub_row = 0;
+        int  provider_sub_type_idx = 0;
+        bool sub_editing = false;
+        std::string provider_sub_type_name;
+        // text fields (display values)
+        std::string sub_field_model;
+        std::string sub_field_endpoint;
+        std::string sub_field_apikey;
+        // the string currently being typed
+        std::string sub_edit_buffer;
+        // Ollama model list
+        int  ollama_fetch_status = 0;  // 0=idle 1=fetching 2=done 3=error
+        int  ollama_model_count = 0;
+        int  ollama_model_idx = 0;
+        std::string ollama_model_name;
+        // GGUF model download (types 5 & 6)
+        int  gguf_model_exists = 0;    // 1 if model file is present on disk
+        int  gguf_download_status = 0; // 0=idle 1=downloading 2=done 3=error
+        int  gguf_download_progress = 0; // 0–100
         std::string status;
         std::string input;
         std::string subtitle;
@@ -157,7 +209,17 @@ private:
     bool reveal_active_ = false;
     bool settings_open_ = false;
     int  settings_row_ = 0;
+    bool provider_sub_open_ = false;
+    int  provider_sub_row_ = 0;
+    int  provider_sub_type_idx_ = 0;
+    bool sub_editing_ = false;        // a text field is active for input
+    std::string sub_field_model_;     // saved model name / path
+    std::string sub_field_endpoint_;  // saved endpoint URL
+    std::string sub_field_apikey_;    // saved API key (plain, masked in display)
+    std::string sub_edit_buffer_;     // text being typed in the active field
+    int  ollama_model_idx_ = 0;       // selected index in the Ollama model list
     int  stt_device_index_ = 0;
+    int  provider_index_ = -1;
     int  mic_gain_step_ = 4;  // 0..8, maps to -12..+12 dB in steps of 3
     int  mic_gate_step_ = 0;  // 0=Off, 1=Low, 2=Medium, 3=High
     int  mic_comp_step_ = 0;  // 0=Off, 1=Light, 2=Medium, 3=Heavy

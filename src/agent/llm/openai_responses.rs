@@ -1,11 +1,11 @@
 use anyhow::{Context, Result};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::agent::{
     config::AgentRuntimeConfig,
     llm::common::{
-        LlmClientConfig, ModelClient, ModelTurn, append_text, ensure_success, make_tool_call,
-        openai_auth_headers, openai_response_tools, parse_arguments,
+        append_text, ensure_success, make_tool_call, openai_auth_headers, openai_response_tools,
+        parse_arguments, LlmClientConfig, ModelClient, ModelTurn,
     },
     session::{SessionMessage, SessionRole},
     tools::ToolDefinition,

@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
 use crate::mcp::types::McpServerConfig;
@@ -75,6 +75,31 @@ impl AutonomyConfig {
     }
 }
 
+/// Controls which services load at startup.  Stored under `services` in config.json.
+#[derive(Clone, Debug)]
+pub struct ServicesConfig {
+    /// Load the TTS (Christina voice) engine.  Default: true.
+    pub tts: bool,
+    /// Load the STT (Whisper) engine.  Default: true.
+    pub stt: bool,
+    /// Use the local llama.cpp model instead of the configured external provider.  Default: false.
+    pub local_llm: bool,
+    /// Path to the GGUF model file for local inference.
+    /// Defaults to `assets/models/llm/Qwen3-4B-q8_0.gguf` relative to the manifest.
+    pub local_llm_model_path: Option<PathBuf>,
+}
+
+impl Default for ServicesConfig {
+    fn default() -> Self {
+        Self {
+            tts: true,
+            stt: true,
+            local_llm: false,
+            local_llm_model_path: None,
+        }
+    }
+}
+
 pub(crate) fn amadeus_dir(workspace_root: &Path) -> PathBuf {
     workspace_root.join(AMADEUS_DIR_NAME)
 }
@@ -94,6 +119,8 @@ pub enum LlmProvider {
     Anthropic,
     Gemini,
     Ollama,
+    /// Local llama.cpp inference — model loaded from `ServicesConfig::local_llm_model_path`.
+    LlamaCpp,
 }
 
 impl LlmProvider {
@@ -106,8 +133,9 @@ impl LlmProvider {
             "anthropic" | "claude" => Ok(Self::Anthropic),
             "gemini" | "google" => Ok(Self::Gemini),
             "ollama" => Ok(Self::Ollama),
+            "llama-cpp" | "llama_cpp" | "llamacpp" | "local" => Ok(Self::LlamaCpp),
             other => bail!(
-                "unsupported provider {other:?}; expected openai-chat, openai-responses, anthropic, gemini, or ollama"
+                "unsupported provider {other:?}; expected openai-chat, openai-responses, anthropic, gemini, ollama, or llama-cpp"
             ),
         }
     }
@@ -118,6 +146,7 @@ impl LlmProvider {
             Self::Anthropic => "https://api.anthropic.com/v1",
             Self::Gemini => "https://generativelanguage.googleapis.com/v1beta",
             Self::Ollama => "http://127.0.0.1:11434",
+            Self::LlamaCpp => "",
         }
     }
 
@@ -133,7 +162,7 @@ impl LlmProvider {
                 .ok()
                 .and_then(normalize_optional)
                 .or_else(|| env::var("GOOGLE_API_KEY").ok().and_then(normalize_optional)),
-            Self::Ollama => None,
+            Self::Ollama | Self::LlamaCpp => None,
         }
     }
 }
@@ -146,6 +175,7 @@ impl fmt::Display for LlmProvider {
             Self::Anthropic => write!(f, "anthropic"),
             Self::Gemini => write!(f, "gemini"),
             Self::Ollama => write!(f, "ollama"),
+            Self::LlamaCpp => write!(f, "llama-cpp"),
         }
     }
 }
@@ -227,6 +257,9 @@ pub struct AgentRuntimeConfig {
     pub max_tool_rounds: usize,
     pub autonomy: AutonomyConfig,
     pub shell_policy: ShellPolicyConfig,
+    pub services: ServicesConfig,
+    /// Set at turn-time (never persisted) to indicate the turn came from voice/S2S input.
+    pub voice_mode: bool,
 }
 
 impl AgentRuntimeConfig {
@@ -267,7 +300,9 @@ impl AgentRuntimeConfig {
             model: None,
             api_base: provider.default_api_base().to_string(),
             api_key: provider.default_api_key(),
-            search_api_key: env::var("AMADEUS_SEARCH_API_KEY").ok().and_then(normalize_optional),
+            search_api_key: env::var("AMADEUS_SEARCH_API_KEY")
+                .ok()
+                .and_then(normalize_optional),
             mcp_servers: HashMap::new(),
             temperature: DEFAULT_TEMPERATURE,
             max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
@@ -275,6 +310,8 @@ impl AgentRuntimeConfig {
             max_tool_rounds: DEFAULT_MAX_TOOL_ROUNDS,
             autonomy: AutonomyConfig::default(),
             shell_policy,
+            services: ServicesConfig::default(),
+            voice_mode: false,
         }
     }
 
@@ -337,6 +374,9 @@ impl AgentRuntimeConfig {
         if let Some(mcp_servers) = config.mcp_servers {
             self.mcp_servers.extend(mcp_servers);
         }
+        if let Some(services) = config.services {
+            self.apply_json_services(services, config_dir);
+        }
         Ok(())
     }
 
@@ -372,10 +412,8 @@ impl AgentRuntimeConfig {
             self.autonomy.research.max_pending_notes = max_pending_notes.max(1);
         }
         if let Some(topics) = research.topics {
-            self.autonomy.research.topics = topics
-                .into_iter()
-                .filter_map(normalize_optional)
-                .collect();
+            self.autonomy.research.topics =
+                topics.into_iter().filter_map(normalize_optional).collect();
         }
     }
 
@@ -401,6 +439,25 @@ impl AgentRuntimeConfig {
             self.shell_policy.max_output_chars = max_output_chars.max(1_000);
         }
         Ok(())
+    }
+
+    fn apply_json_services(&mut self, services: JsonServicesConfig, _config_dir: &Path) {
+        if let Some(tts) = services.tts {
+            self.services.tts = tts;
+        }
+        if let Some(stt) = services.stt {
+            self.services.stt = stt;
+        }
+        if let Some(local_llm) = services.local_llm {
+            self.services.local_llm = local_llm;
+        }
+        if let Some(path) = services.local_llm_model_path {
+            // Model paths are relative to workspace root, not the .amadeus/ config dir.
+            self.services.local_llm_model_path = Some(resolve_config_path_value(
+                &self.workspace_root.clone(),
+                path,
+            ));
+        }
     }
 
     fn apply_env_overrides(&mut self) -> Result<()> {
@@ -533,14 +590,35 @@ impl AgentRuntimeConfig {
 
     pub fn normalize_provider_defaults(&mut self) {
         self.model = self.model.take().and_then(normalize_optional);
-        self.api_base = normalize_optional(self.api_base.clone())
-            .unwrap_or_else(|| self.provider.default_api_base().to_string());
+        // LlamaCpp has no remote API base; skip the default substitution.
+        if self.provider != LlmProvider::LlamaCpp {
+            self.api_base = normalize_optional(self.api_base.clone())
+                .unwrap_or_else(|| self.provider.default_api_base().to_string());
+        }
         self.api_key = self
             .api_key
             .take()
             .and_then(normalize_optional)
             .or_else(|| self.provider.default_api_key());
+
+        // Apply the default GGUF model path when local LLM is enabled and no path was configured.
+        if self.services.local_llm && self.services.local_llm_model_path.is_none() {
+            self.services.local_llm_model_path = Some(
+                self.workspace_root
+                    .join("assets/models/llm/Qwen3-4B-q8_0.gguf"),
+            );
+        }
     }
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct JsonServicesConfig {
+    tts: Option<bool>,
+    stt: Option<bool>,
+    #[serde(alias = "localLlm")]
+    local_llm: Option<bool>,
+    #[serde(alias = "localLlmModelPath")]
+    local_llm_model_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -567,6 +645,7 @@ struct JsonAgentRuntimeConfig {
     shell_policy: Option<JsonShellPolicyConfig>,
     #[serde(alias = "mcpServers")]
     mcp_servers: Option<HashMap<String, McpServerConfig>>,
+    services: Option<JsonServicesConfig>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -677,7 +756,7 @@ mod tests {
     use anyhow::Result;
     use tempfile::tempdir;
 
-    use super::{AgentRuntimeConfig, LlmProvider, load_json_config, resolve_config_path};
+    use super::{load_json_config, resolve_config_path, AgentRuntimeConfig, LlmProvider};
 
     #[test]
     fn resolve_config_path_reads_dot_amadeus_config() -> Result<()> {
@@ -758,16 +837,16 @@ mod tests {
         Ok(())
     }
 
-        #[test]
-        fn json_config_applies_context_budget_and_research_settings() -> Result<()> {
-                let temp = tempdir()?;
-                let workspace_root = temp.path().join("workspace");
-                let config_dir = workspace_root.join(".amadeus");
-                let config_path = config_dir.join("config.json");
-                fs::create_dir_all(&config_dir)?;
-                fs::write(
-                        &config_path,
-                        r#"{
+    #[test]
+    fn json_config_applies_context_budget_and_research_settings() -> Result<()> {
+        let temp = tempdir()?;
+        let workspace_root = temp.path().join("workspace");
+        let config_dir = workspace_root.join(".amadeus");
+        let config_path = config_dir.join("config.json");
+        fs::create_dir_all(&config_dir)?;
+        fs::write(
+            &config_path,
+            r#"{
     "maxContextTokens": 12000,
     "autonomy": {
         "research": {
@@ -778,20 +857,20 @@ mod tests {
         }
     }
 }"#,
-                )?;
+        )?;
 
-                let mut runtime = AgentRuntimeConfig::with_defaults(workspace_root);
-                let config = load_json_config(&config_path)?;
-                runtime.apply_json_config(config, &config_dir)?;
+        let mut runtime = AgentRuntimeConfig::with_defaults(workspace_root);
+        let config = load_json_config(&config_path)?;
+        runtime.apply_json_config(config, &config_dir)?;
 
-                assert_eq!(runtime.max_context_tokens, 12_000);
-                assert!(runtime.autonomy.research.enabled);
-                assert_eq!(runtime.autonomy.research.absent_user_minutes, 60);
-                assert_eq!(runtime.autonomy.research.max_pending_notes, 4);
-                assert_eq!(
-                        runtime.autonomy.research.topics,
-                        vec!["continuity".to_string(), "context compaction".to_string()]
-                );
-                Ok(())
-        }
+        assert_eq!(runtime.max_context_tokens, 12_000);
+        assert!(runtime.autonomy.research.enabled);
+        assert_eq!(runtime.autonomy.research.absent_user_minutes, 60);
+        assert_eq!(runtime.autonomy.research.max_pending_notes, 4);
+        assert_eq!(
+            runtime.autonomy.research.topics,
+            vec!["continuity".to_string(), "context compaction".to_string()]
+        );
+        Ok(())
+    }
 }

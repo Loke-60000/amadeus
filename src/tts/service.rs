@@ -8,14 +8,13 @@ use std::{
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::VarBuilder;
 use qwen3_tts::{
-    AudioBuffer, CODEC_EOS_TOKEN_ID, CodePredictor, CodePredictorConfig, ModelPaths,
-    ParsedModelConfig, SynthesisOptions, TalkerConfig, TalkerModel, codec_tokens,
-    compute_dtype_for_device,
+    codec_tokens, compute_dtype_for_device,
     generation::{self, GenerationConfig, SamplingContext},
     models::{self, codec::Decoder12Hz},
     parse_device, special_tokens,
     tokenizer::TextTokenizer,
-    tts_tokens,
+    tts_tokens, AudioBuffer, CodePredictor, CodePredictorConfig, ModelPaths, ParsedModelConfig,
+    SynthesisOptions, TalkerConfig, TalkerModel, CODEC_EOS_TOKEN_ID,
 };
 
 use crate::{
@@ -23,7 +22,7 @@ use crate::{
     tts::{
         config::TtsRuntimeConfig,
         japanese::preload_japanese_tts_support,
-        routing::{TtsRequest, ValidatedTtsRequest, ValidatedTtsSpan, validate_request},
+        routing::{validate_request, TtsRequest, ValidatedTtsRequest, ValidatedTtsSpan},
     },
 };
 
@@ -1125,8 +1124,8 @@ mod smoke_tests {
     #[test]
     #[ignore = "requires the local qwen3-tts runtime and model assets"]
     fn local_runtime_synthesizes_basic_english_and_japanese_audio() {
-        let service =
-            TtsService::new(discover_tts_runtime_config()).expect("TTS service should initialize");
+        let service = TtsService::new(discover_tts_runtime_config(None))
+            .expect("TTS service should initialize");
 
         service.preload().expect("TTS runtime should preload");
 

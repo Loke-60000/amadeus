@@ -7,15 +7,15 @@ use std::sync::{Arc, Mutex};
 
 use crate::{
     agent::{
-        autonomy::{AutonomyCycleReport, build_cycle_plan, finalize_cycle},
+        autonomy::{build_cycle_plan, finalize_cycle, AutonomyCycleReport},
         config::AgentRuntimeConfig,
-        llm::{ModelClient, TextStreamSink, build_model_client},
+        llm::{build_model_client, ModelClient, TextStreamSink},
         prompt::PromptComposer,
         session::{AgentSession, SessionStore},
         tools::ToolCatalog,
         workspace::AgentWorkspace,
     },
-    mcp::{McpAgentTool, client::McpClient},
+    mcp::{client::McpClient, McpAgentTool},
 };
 
 pub struct AgentApp {
@@ -23,17 +23,30 @@ pub struct AgentApp {
     workspace: AgentWorkspace,
     session_store: SessionStore,
     session: AgentSession,
-    model: Box<dyn ModelClient>,
+    model: Arc<dyn ModelClient + Send + Sync>,
     tools: ToolCatalog,
 }
 
 impl AgentApp {
     pub fn new(config: AgentRuntimeConfig) -> Result<Self> {
+        let model = Arc::from(build_model_client(&config)?);
+        Self::with_client(config, model)
+    }
+
+    /// Construct an `AgentApp` with a pre-loaded model client (avoids reloading from disk).
+    pub fn with_client(
+        config: AgentRuntimeConfig,
+        model: Arc<dyn ModelClient + Send + Sync>,
+    ) -> Result<Self> {
         let workspace = AgentWorkspace::load(config.workspace_root.clone())?;
         let session_store = SessionStore::new(workspace.boundary.root())?;
         let session = session_store.load_or_create(&config.session_id)?;
-        let model = build_model_client(&config)?;
-        let mut tools = ToolCatalog::new(workspace.boundary.clone(), config.shell_policy.clone(), config.search_api_key.clone(), workspace.skills.clone());
+        let mut tools = ToolCatalog::new(
+            workspace.boundary.clone(),
+            config.shell_policy.clone(),
+            config.search_api_key.clone(),
+            workspace.skills.clone(),
+        );
 
         // Spawn MCP servers and register their tools.
         for (name, cfg) in &config.mcp_servers {
@@ -41,23 +54,21 @@ impl AgentApp {
                 Err(e) => {
                     eprintln!("[mcp] failed to start server {name}: {e:#}");
                 }
-                Ok(mut client) => {
-                    match client.list_tools() {
-                        Err(e) => {
-                            eprintln!("[mcp] failed to list tools for {name}: {e:#}");
-                        }
-                        Ok(specs) => {
-                            let client = Arc::new(Mutex::new(client));
-                            for spec in specs {
-                                tools.register(Box::new(McpAgentTool {
-                                    server_name: name.clone(),
-                                    spec,
-                                    client: Arc::clone(&client),
-                                }));
-                            }
+                Ok(mut client) => match client.list_tools() {
+                    Err(e) => {
+                        eprintln!("[mcp] failed to list tools for {name}: {e:#}");
+                    }
+                    Ok(specs) => {
+                        let client = Arc::new(Mutex::new(client));
+                        for spec in specs {
+                            tools.register(Box::new(McpAgentTool {
+                                server_name: name.clone(),
+                                spec,
+                                client: Arc::clone(&client),
+                            }));
                         }
                     }
-                }
+                },
             }
         }
 

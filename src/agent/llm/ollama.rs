@@ -1,14 +1,14 @@
 use std::io::{BufRead, BufReader};
 
 use anyhow::{Context, Result};
-use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
-use serde_json::{Value, json};
+use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
+use serde_json::{json, Value};
 
 use crate::agent::{
     config::AgentRuntimeConfig,
     llm::common::{
-        LlmClientConfig, ModelClient, ModelTurn, TextStreamSink, append_text,
-        build_ollama_messages, ensure_success, make_tool_call, openai_chat_tools,
+        append_text, build_ollama_messages, ensure_success, make_tool_call, openai_chat_tools,
+        LlmClientConfig, ModelClient, ModelTurn, TextStreamSink,
     },
     session::SessionMessage,
     tools::ToolDefinition,

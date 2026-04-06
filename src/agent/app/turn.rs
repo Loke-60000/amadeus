@@ -1,10 +1,8 @@
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use serde_json::json;
 
 use crate::agent::{
-    context::prepare_model_context,
-    llm::TextStreamSink,
-    session::SessionVisibility,
+    context::prepare_model_context, llm::TextStreamSink, session::SessionVisibility,
 };
 
 use super::AgentApp;

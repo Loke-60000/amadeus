@@ -15,6 +15,26 @@
 
 extern "C" unsigned int amadeus_native_boot_audio_play(const char* path, unsigned int fallback_ms);
 
+extern "C" {
+    // GGUF (LLM) model download
+    int  amadeus_native_gguf_model_exists(int type_index);
+    void amadeus_native_gguf_download_start(int type_index);
+    int  amadeus_native_gguf_download_status();
+    int  amadeus_native_gguf_download_progress();
+
+    // STT model download
+    int  amadeus_native_stt_model_exists();
+    void amadeus_native_stt_download_start();
+    int  amadeus_native_stt_download_status();
+    int  amadeus_native_stt_download_progress();
+
+    // TTS model cache check
+    int  amadeus_native_tts_model_cached();
+
+    // Post-boot service init
+    void amadeus_native_init_services();
+}
+
 // ─── Boot terminal lines ──────────────────────────────────────────────────────
 // Edit this array to change what appears during the terminal phase.
 
@@ -147,8 +167,9 @@ BootSequence::BootSequence(
 
 bool BootSequence::Run()
 {
-    if (!RunTerminalPhase()) return false;
-    if (!RunLogoPhase())     return false;
+    if (!RunTerminalPhase())      return false;
+    if (!RunModelLoadingPhase())  return false;
+    if (!RunLogoPhase())          return false;
     return true;
 }
 
@@ -381,6 +402,171 @@ bool BootSequence::RunTerminalPhase()
     }
 
     return false;
+}
+
+// ─── Phase 1.5: model loading bars ───────────────────────────────────────────
+
+bool BootSequence::RunModelLoadingPhase()
+{
+    // If all models are already present, skip the loading bars entirely
+    // and proceed directly to the logo phase.
+    const bool llm_downloading = amadeus_native_gguf_download_status() == 1;
+    const bool stt_downloading = amadeus_native_stt_download_status() == 1;
+    if (!llm_downloading && !stt_downloading) {
+        amadeus_native_init_services();
+        return glfwWindowShouldClose(window_) == GLFW_FALSE;
+    }
+
+    // ── At least one model is downloading — show the loading bars ────────────
+    constexpr int   kBarCols  = 24;     // filled cells in a complete bar
+    constexpr float kBarScale = 1.0f;   // reserved for future per-row scaling
+
+    const int line_h = std::max(1,
+        static_cast<int>(static_cast<float>(term_renderer_.line_height()) * kLineSpacingMul));
+    const float cell_w = static_cast<float>(term_renderer_.char_width());
+
+    // Helper: draw one bar row.
+    //   label     — left-aligned name, padded to 14 chars
+    //   progress  — 0..100
+    //   status    — 0=idle 1=downloading 2=done 3=error
+    const auto draw_row = [&](float y, const char* label, int progress, int status) {
+        char buf[128];
+
+        // Determine filled bar width and right-side text
+        int filled = 0;
+        const char* right_text = "";
+        char right_buf[32] = {};
+        if (status == 2) {
+            filled = kBarCols;
+            right_text = "Ready";
+        } else if (status == 3) {
+            filled = 0;
+            right_text = "Error";
+        } else if (status == 1) {
+            filled = (int)(progress * kBarCols / 100.0f);
+            std::snprintf(right_buf, sizeof(right_buf), "%3d%%", progress);
+            right_text = right_buf;
+        } else {
+            right_text = "Waiting";
+        }
+
+        // Build bar string: [████░░░░░░░░] or [████████████]
+        char bar[kBarCols + 3 + 1];  // '[' + cells + ']' + '\0'
+        bar[0] = '[';
+        for (int i = 0; i < kBarCols; ++i) {
+            // Use UTF-8 block character: █ (U+2588) = 0xE2 0x96 0x88
+            // Use ░ (U+2591) = 0xE2 0x96 0x91 for empty
+            if (i < filled)
+                bar[i + 1] = '\x01';  // placeholder, replaced below
+            else
+                bar[i + 1] = '\x02';
+        }
+        bar[kBarCols + 1] = ']';
+        bar[kBarCols + 2] = '\0';
+
+        // Build display string with UTF-8 blocks
+        std::string row_str;
+        row_str.reserve(128);
+        // Label, left-padded to 16 chars
+        row_str += "  ";
+        row_str += label;
+        // Pad to 16
+        size_t label_len = std::char_traits<char>::length(label);
+        for (size_t i = label_len; i < 16; ++i) row_str += ' ';
+        // Bar
+        row_str += '[';
+        for (int i = 0; i < kBarCols; ++i) {
+            if (i < filled) {
+                // U+2588 FULL BLOCK
+                row_str += "\xe2\x96\x88";
+            } else {
+                // U+2591 LIGHT SHADE
+                row_str += "\xe2\x96\x91";
+            }
+        }
+        row_str += ']';
+        row_str += "  ";
+        row_str += right_text;
+
+        float r = kGreenR, g = kGreenG, b = kGreenB;
+        if (status == 2) { r = kDimR; g = kDimG; b = kDimB; }   // dim when done
+        if (status == 3) { r = 0.9f; g = 0.5f; b = 0.05f; }    // orange-ish for error
+
+        term_renderer_.DrawTextFixed(kPadX, y, row_str, cell_w, r, g, b, kFullAlpha);
+    };
+
+    const auto draw_frame = [&]() {
+        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        BeginDraw();
+
+        float y = kPadY;
+
+        // Header
+        term_renderer_.DrawTextFixed(kPadX, y, "  Loading AI models...", cell_w,
+                                      kGreenR, kGreenG, kGreenB, kFullAlpha);
+        y += static_cast<float>(line_h) * 1.5f;
+
+        // LLM row (Amadeus built-in)
+        draw_row(y, "LLM (Amadeus)",
+                 amadeus_native_gguf_download_progress(),
+                 amadeus_native_gguf_download_status());
+        y += static_cast<float>(line_h) * 1.4f;
+
+        // STT row (Whisper)
+        draw_row(y, "STT (Whisper)",
+                 amadeus_native_stt_download_progress(),
+                 amadeus_native_stt_download_status());
+        y += static_cast<float>(line_h) * 1.4f;
+
+        // TTS row — lazy download, show cache status only
+        {
+            int tts_cached = amadeus_native_tts_model_cached();
+            int tts_status = tts_cached ? 2 : 0;   // 2=Ready  0=Will download on first use
+            draw_row(y, "TTS (Voice)",
+                     tts_cached ? 100 : 0,
+                     tts_status);
+        }
+
+        EndDraw();
+    };
+
+    // Poll until LLM and STT are either done (2) or errored (3), or already present.
+    // TTS is lazy so we don't block on it.
+    const auto both_ready = [&]() -> bool {
+        int llm = amadeus_native_gguf_download_status();
+        int stt = amadeus_native_stt_download_status();
+        // status 0 means model was already present (we set it to 2 in preflight if present)
+        // so only 1 (downloading) keeps us waiting.
+        return llm != 1 && stt != 1;
+    };
+
+    while (glfwWindowShouldClose(window_) == GLFW_FALSE) {
+        draw_frame();
+        if (!SwapAndPoll()) return false;
+        if (both_ready()) break;
+    }
+
+    if (glfwWindowShouldClose(window_)) return false;
+
+    // Draw one final frame with completed state, then call into Rust to init services.
+    draw_frame();
+    if (!SwapAndPoll()) return false;
+
+    // Final render showing "Ready" on all rows, hold briefly so the user sees it.
+    {
+        const double hold_until = glfwGetTime() + 0.6;
+        while (glfwGetTime() < hold_until) {
+            if (glfwWindowShouldClose(window_)) return false;
+            draw_frame();
+            if (!SwapAndPoll()) return false;
+        }
+    }
+
+    // Initialize Rust services (TTS, STT, agent) now that models are present.
+    amadeus_native_init_services();
+
+    return glfwWindowShouldClose(window_) == GLFW_FALSE;
 }
 
 // ─── Phase 2: boot logo frames ────────────────────────────────────────────────

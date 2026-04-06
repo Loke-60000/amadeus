@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = ["cuda", "stt-cuda"]
+default = ["cuda", "stt-cuda", "local-llm", "llm-cuda"]
 cuda = ["qwen3-tts/cuda"]
 flash-attn = ["cuda", "qwen3-tts/flash-attn"]
 metal = ["qwen3-tts/metal"]
@@ -12,6 +12,12 @@ mkl = ["qwen3-tts/mkl"]
 accelerate = ["qwen3-tts/accelerate"]
 stt-vulkan = ["whisper-rs/vulkan"]
 stt-cuda = ["whisper-rs/cuda"]
+# Enable local llama.cpp inference.  Requires the C++ bridge to be compiled
+# (third_party/llama.cpp submodule + build.rs cmake build).
+local-llm = []
+# GPU backends for local llama.cpp inference (mutually exclusive with each other).
+llm-vulkan = ["local-llm"]   # Vulkan — works on AMD, Intel, and NVIDIA
+llm-cuda   = ["local-llm"]   # CUDA   — NVIDIA only
 
 [dependencies]
 anyhow = "1.0"
@@ -42,4 +48,5 @@ tempfile = "3.23.0"
 
 [build-dependencies]
 cc = "1.1"
+cmake = "0.1"
 pkg-config = "0.3"

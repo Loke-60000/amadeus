@@ -1,23 +1,21 @@
 use std::{
     sync::{
-        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
+        Arc, Mutex, RwLock,
     },
     thread,
     time::Duration,
 };
 
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    agent::{
-        autonomy::AutonomyActivity,
-        app::AgentApp,
-        config::AgentRuntimeConfig,
-        llm::TextStreamSink,
-        session::{AgentSession, SessionMessage, SessionRole, SessionVisibility},
-    },
+use crate::agent::{
+    app::AgentApp,
+    autonomy::AutonomyActivity,
+    config::AgentRuntimeConfig,
+    llm::{build_model_client, ModelClient, TextStreamSink},
+    session::{AgentSession, SessionMessage, SessionRole, SessionVisibility},
 };
 
 const DEFAULT_UI_SESSION_ID: &str = "desktop-ui";
@@ -29,6 +27,9 @@ pub struct AgentUiTurnRequest {
     pub prompt: String,
     #[serde(default)]
     pub session_id: Option<String>,
+    /// True when the turn originated from speech-to-text input (voice/S2S mode).
+    #[serde(default)]
+    pub voice_mode: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -67,8 +68,11 @@ pub struct AgentUiTurnResponse {
 }
 
 pub struct AgentUiService {
-    base_runtime: AgentRuntimeConfig,
+    base_runtime: RwLock<AgentRuntimeConfig>,
     execution_lock: Arc<Mutex<()>>,
+    /// Pre-loaded model client. `None` until the background load completes (or if
+    /// the provider is not LlamaCpp, it stays `None` and we build per-turn instead).
+    cached_client: Arc<Mutex<Option<Arc<dyn ModelClient + Send + Sync>>>>,
     _autonomy_worker: Option<AutonomyWorker>,
 }
 
@@ -77,10 +81,73 @@ impl AgentUiService {
         base_runtime.normalize_provider_defaults();
         let execution_lock = Arc::new(Mutex::new(()));
         let autonomy_worker = spawn_autonomy_worker(&base_runtime, execution_lock.clone());
+
+        // Pre-load the model client in a background thread so the first user turn
+        // doesn't pay the full GGUF load cost.  For cloud providers this is a no-op
+        // (construction is cheap); for LlamaCpp it amortises the ~4 GB disk load.
+        let cached_client: Arc<Mutex<Option<Arc<dyn ModelClient + Send + Sync>>>> =
+            Arc::new(Mutex::new(None));
+        let cache_ref = Arc::clone(&cached_client);
+        let config_for_preload = base_runtime.clone();
+        thread::Builder::new()
+            .name("amadeus-llm-preload".to_string())
+            .spawn(move || match build_model_client(&config_for_preload) {
+                Ok(client) => {
+                    let arc_client: Arc<dyn ModelClient + Send + Sync> = Arc::from(client);
+                    if let Ok(mut guard) = cache_ref.lock() {
+                        *guard = Some(arc_client);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[amadeus] model pre-load failed: {e:#}");
+                }
+            })
+            .ok();
+
         Self {
-            base_runtime,
+            base_runtime: RwLock::new(base_runtime),
             execution_lock,
+            cached_client,
             _autonomy_worker: autonomy_worker,
+        }
+    }
+
+    /// Returns `true` once the model is ready for inference without a blocking load stall.
+    /// This is true if either:
+    ///   a) the cached client is built (normal path), or
+    ///   b) the persistent GGUF handle is already in VRAM (survives reload_config()).
+    pub fn is_model_ready(&self) -> bool {
+        if self.cached_client.lock().map(|g| g.is_some()).unwrap_or(true) {
+            return true;
+        }
+        // The persistent handle stays loaded across config reloads — building a wrapper is instant.
+        crate::agent::llm::llama_cpp::is_handle_loaded()
+    }
+
+    /// Reload the base runtime config from disk so subsequent turns use the updated settings.
+    /// Call this after writing to config.json (e.g. from a `/settings` command).
+    pub fn reload_config(&self) {
+        let workspace_root = {
+            let rt = self.base_runtime.read().unwrap();
+            rt.workspace_root.clone()
+        };
+        match AgentRuntimeConfig::load(Some(workspace_root), None) {
+            Ok(new_config) => {
+                // If the user switched away from local LLM, free the model from VRAM.
+                if new_config.provider != crate::agent::config::LlmProvider::LlamaCpp {
+                    crate::agent::llm::llama_cpp::release_persistent_handle();
+                }
+                *self.base_runtime.write().unwrap() = new_config;
+                // Invalidate the cached client so the next turn re-loads with the new config.
+                if let Ok(mut guard) = self.cached_client.lock() {
+                    *guard = None;
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "[amadeus] warning: failed to reload config after settings change: {e:#}"
+                );
+            }
         }
     }
 
@@ -92,7 +159,8 @@ impl AgentUiService {
 
         let prompt = validate_prompt(&request.prompt)?;
         let runtime = self.runtime_for_session(request.session_id);
-        let mut app = AgentApp::new(runtime.clone())?;
+        let client = self.take_or_build_client(&runtime)?;
+        let mut app = AgentApp::with_client(runtime.clone(), client)?;
         let reply = app.run_single_prompt(&prompt)?;
 
         Ok(AgentUiTurnResponse {
@@ -119,8 +187,10 @@ impl AgentUiService {
             .map_err(|_| anyhow::anyhow!("failed to lock the agent runtime"))?;
 
         let prompt = validate_prompt(&request.prompt)?;
-        let runtime = self.runtime_for_session(request.session_id);
-        let mut app = AgentApp::new(runtime.clone())?;
+        let mut runtime = self.runtime_for_session(request.session_id);
+        runtime.voice_mode = request.voice_mode;
+        let client = self.take_or_build_client(&runtime)?;
+        let mut app = AgentApp::with_client(runtime.clone(), client)?;
         let reply = app.run_single_prompt_streaming(&prompt, stream)?;
 
         Ok(AgentUiTurnResponse {
@@ -137,9 +207,46 @@ impl AgentUiService {
     }
 
     fn runtime_for_session(&self, session_id: Option<String>) -> AgentRuntimeConfig {
-        let mut runtime = self.base_runtime.clone();
+        let mut runtime = self.base_runtime.read().unwrap().clone();
         runtime.session_id = normalize_session_id(session_id.as_deref());
         runtime
+    }
+
+    /// Return the cached pre-loaded client if available; otherwise build a fresh one.
+    /// After this call the cache slot is empty — the client is owned by the caller.
+    /// The next turn will re-populate the cache via the pre-load thread if needed,
+    /// or build synchronously again if the thread hasn't finished yet.
+    fn take_or_build_client(
+        &self,
+        runtime: &AgentRuntimeConfig,
+    ) -> Result<Arc<dyn ModelClient + Send + Sync>> {
+        // Try to take the pre-loaded client.
+        if let Ok(mut guard) = self.cached_client.lock() {
+            if let Some(client) = guard.take() {
+                // Kick off a new pre-load for the next turn while the current turn runs.
+                let cache_ref = Arc::clone(&self.cached_client);
+                let config_for_preload = self.base_runtime.read().unwrap().clone();
+                thread::Builder::new()
+                    .name("amadeus-llm-preload".to_string())
+                    .spawn(move || match build_model_client(&config_for_preload) {
+                        Ok(next_client) => {
+                            let arc_client: Arc<dyn ModelClient + Send + Sync> =
+                                Arc::from(next_client);
+                            if let Ok(mut g) = cache_ref.lock() {
+                                *g = Some(arc_client);
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("[amadeus] model pre-load failed: {e:#}");
+                        }
+                    })
+                    .ok();
+                return Ok(client);
+            }
+        }
+        // Cache miss — build synchronously.
+        let client = Arc::from(build_model_client(runtime)?);
+        Ok(client)
     }
 }
 
@@ -258,7 +365,8 @@ fn spawn_autonomy_worker(
                     Err(_) => return,
                 };
 
-                let result = AgentApp::new(runtime.clone()).and_then(|mut app| app.run_autonomy_cycle());
+                let result =
+                    AgentApp::new(runtime.clone()).and_then(|mut app| app.run_autonomy_cycle());
                 match result {
                     Ok(report) => {
                         let activity = match report.activity {

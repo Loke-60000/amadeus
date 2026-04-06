@@ -4,14 +4,14 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::agent::{
     config::AgentRuntimeConfig,
     llm::common::{
-        LlmClientConfig, ModelClient, ModelToolCall, ModelTurn, TextStreamSink, append_text,
-        build_openai_chat_messages, ensure_success, openai_auth_headers, openai_chat_tools,
-        parse_arguments,
+        append_text, build_openai_chat_messages, ensure_success, openai_auth_headers,
+        openai_chat_tools, parse_arguments, LlmClientConfig, ModelClient, ModelToolCall, ModelTurn,
+        TextStreamSink,
     },
     session::SessionMessage,
     tools::ToolDefinition,

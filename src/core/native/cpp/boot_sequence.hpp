@@ -21,6 +21,7 @@ public:
 
 private:
     bool RunTerminalPhase();
+    bool RunModelLoadingPhase();
     bool RunLogoPhase();
 
     void BeginDraw() const;

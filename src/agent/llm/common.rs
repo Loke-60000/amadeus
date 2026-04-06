@@ -1,9 +1,9 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use reqwest::{
     blocking::{Client, Response},
-    header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue},
+    header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE},
 };
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::agent::{
     config::AgentRuntimeConfig,

@@ -43,6 +43,43 @@ void amadeus_native_free_string(char* value);
 void amadeus_native_voice_clear();
 int amadeus_native_voice_enqueue(const char* text);
 const char* amadeus_native_backend_last_error_message();
+int amadeus_native_providers_count();
+const char* amadeus_native_providers_name_at(int index);
+int amadeus_native_providers_active_index();
+void amadeus_native_providers_select(int index);
+int amadeus_native_provider_type_count();
+const char* amadeus_native_provider_type_name(int index);
+int amadeus_native_provider_active_type_index();
+const char* amadeus_native_provider_current_model();
+const char* amadeus_native_provider_current_endpoint();
+const char* amadeus_native_provider_current_apikey();
+const char* amadeus_native_provider_current_model_path();
+void amadeus_native_provider_set_config(
+    int type_index,
+    const char* model,
+    const char* endpoint,
+    const char* api_key);
+void amadeus_native_ollama_fetch_models(const char* endpoint);
+int  amadeus_native_ollama_fetch_status();
+int  amadeus_native_ollama_model_count();
+const char* amadeus_native_ollama_model_at(int index);
+int  amadeus_native_ollama_model_index(const char* model_name);
+// GGUF model download (types 5 & 6)
+int  amadeus_native_gguf_model_exists(int type_index);
+void amadeus_native_gguf_download_start(int type_index);
+int  amadeus_native_gguf_download_status();
+int  amadeus_native_gguf_download_progress();
+// STT model download
+int  amadeus_native_stt_model_exists();
+void amadeus_native_stt_download_start();
+int  amadeus_native_stt_download_status();
+int  amadeus_native_stt_download_progress();
+// TTS model cache
+int  amadeus_native_tts_model_cached();
+// Local LLM preload status: 1 while background loading, 0 when ready
+int  amadeus_native_llm_loading();
+// 1 while the model is inside a <think>…</think> block
+int  amadeus_native_llm_thinking();
 }
 
 namespace {
@@ -265,7 +302,12 @@ void AmadeusOverlay::Initialize() {
     reveal_active_ = false;
     settings_open_ = false;
     settings_row_ = 0;
+    provider_sub_open_ = false;
+    provider_sub_row_ = 0;
+    provider_sub_type_idx_ = amadeus_native_provider_active_type_index();
+    sub_editing_ = false;
     stt_device_index_ = 0;
+    provider_index_ = amadeus_native_providers_active_index();
     app_mode_ = AppMode::Chat;
     voice_lang_ = VoiceLang::Auto;
     stt_sensitivity_ = VadSensitivity::Medium;
@@ -704,6 +746,8 @@ void AmadeusOverlay::SubmitPrompt() {
     std::string prompt;
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        // Re-query live: the agent may have been configured after Initialize() ran.
+        agent_enabled_ = amadeus_native_agent_available() != 0;
         if (!agent_enabled_) {
             status_ = "The native agent is unavailable. Configure .amadeus/config.json first.";
             subtitle_ = "Agent unavailable.";
@@ -748,7 +792,12 @@ void AmadeusOverlay::SubmitPrompt() {
 AmadeusOverlay::Snapshot AmadeusOverlay::CaptureSnapshot() {
     std::lock_guard<std::mutex> lock(mutex_);
     Snapshot snap;
-    snap.agent_enabled    = agent_enabled_;
+    snap.agent_enabled    = amadeus_native_agent_available() != 0;
+    snap.llm_loading      = amadeus_native_llm_loading() != 0;
+    snap.llm_thinking     = amadeus_native_llm_thinking() != 0;
+    // Re-poll every frame: STT and voice finish loading after Initialize() is called.
+    voice_enabled_        = amadeus_native_voice_available() != 0;
+    stt_enabled_          = amadeus_native_stt_available() != 0;
     snap.voice_enabled    = voice_enabled_;
     snap.stt_enabled      = stt_enabled_;
     snap.request_in_flight = request_in_flight_;
@@ -778,6 +827,38 @@ AmadeusOverlay::Snapshot AmadeusOverlay::CaptureSnapshot() {
     snap.app_mode         = app_mode_;
     snap.voice_lang       = voice_lang_;
     snap.stt_sensitivity  = stt_sensitivity_;
+    snap.provider_count   = amadeus_native_providers_count();
+    snap.provider_index   = provider_index_;
+    if (provider_index_ >= 0) {
+        const char* name = amadeus_native_providers_name_at(provider_index_);
+        snap.provider_name = name ? name : "";
+    } else if (snap.provider_count > 0) {
+        snap.provider_name = "Custom";
+    }
+    // provider sub-panel
+    snap.provider_sub_open      = provider_sub_open_;
+    snap.provider_sub_row       = provider_sub_row_;
+    snap.provider_sub_type_idx  = provider_sub_type_idx_;
+    snap.sub_editing            = sub_editing_;
+    {
+        const char* tn = amadeus_native_provider_type_name(provider_sub_type_idx_);
+        snap.provider_sub_type_name = tn ? tn : "";
+    }
+    snap.sub_field_model      = sub_field_model_;
+    snap.sub_field_endpoint   = sub_field_endpoint_;
+    snap.sub_field_apikey     = sub_field_apikey_;
+    snap.sub_edit_buffer      = sub_edit_buffer_;
+    snap.ollama_fetch_status  = amadeus_native_ollama_fetch_status();
+    snap.ollama_model_count   = amadeus_native_ollama_model_count();
+    snap.ollama_model_idx     = ollama_model_idx_;
+    {
+        const char* mn = amadeus_native_ollama_model_at(ollama_model_idx_);
+        snap.ollama_model_name = mn ? mn : "";
+    }
+    // GGUF download state (queried live — no lock needed, atomics)
+    snap.gguf_model_exists    = amadeus_native_gguf_model_exists(provider_sub_type_idx_);
+    snap.gguf_download_status = amadeus_native_gguf_download_status();
+    snap.gguf_download_progress = amadeus_native_gguf_download_progress();
     snap.status           = status_;
     snap.input            = input_;
     snap.subtitle         = subtitle_;
@@ -893,6 +974,198 @@ void AmadeusOverlay::HandleKey(GLFWwindow* window, int key, int action, int mods
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (settings_open_) {
+
+            // Provider sub-panel intercepts all navigation when open.
+            if (provider_sub_open_) {
+                // helper: max navigable row for the current provider type
+                // 0=Anthropic  1=OpenAI  2=Gemini  3=OpenAI-compat
+                // 4=Ollama     5=Llama.cpp          6=Amadeus
+                const auto sub_max_row = [&]() -> int {
+                    switch (provider_sub_type_idx_) {
+                    case 3:  return 4; // type, model, endpoint, api_key, save
+                    case 4:  return 3; // type, endpoint, model (cycle), save
+                    case 5:  return 3; // type, model_path, download, save
+                    case 6:  return 2; // type, download, save
+                    default: return 3; // type, model, api_key, save
+                    }
+                };
+
+                // helper: returns a pointer to the editable text field for the current row.
+                // Returns nullptr if the row is not a text field (cycle rows, Amadeus).
+                const auto active_field = [&]() -> std::string* {
+                    switch (provider_sub_type_idx_) {
+                    case 0: case 1: case 2:          // Anthropic/OpenAI/Gemini
+                        if (provider_sub_row_ == 1) return &sub_field_model_;
+                        if (provider_sub_row_ == 2) return &sub_field_apikey_;
+                        break;
+                    case 3:                           // OpenAI-compatible
+                        if (provider_sub_row_ == 1) return &sub_field_model_;
+                        if (provider_sub_row_ == 2) return &sub_field_endpoint_;
+                        if (provider_sub_row_ == 3) return &sub_field_apikey_;
+                        break;
+                    case 4:                           // Ollama: endpoint is text, model is cycle
+                        if (provider_sub_row_ == 1) return &sub_field_endpoint_;
+                        break;
+                    case 5:                           // Llama.cpp
+                        if (provider_sub_row_ == 1) return &sub_field_model_;
+                        break;
+                    default: break;
+                    }
+                    return nullptr;
+                };
+
+                // helper: apply the current sub-panel state to config.json
+                const auto apply_config = [&]() {
+                    const char* endpoint = "";
+                    if (provider_sub_type_idx_ == 3 || provider_sub_type_idx_ == 4) {
+                        endpoint = sub_field_endpoint_.c_str();
+                    }
+                    // For Ollama, the selected model comes from the fetched list.
+                    std::string ollama_sel;
+                    if (provider_sub_type_idx_ == 4) {
+                        const char* mn = amadeus_native_ollama_model_at(ollama_model_idx_);
+                        ollama_sel = mn ? mn : "";
+                    }
+                    const std::string& model = (provider_sub_type_idx_ == 4)
+                        ? ollama_sel : sub_field_model_;
+                    amadeus_native_provider_set_config(
+                        provider_sub_type_idx_,
+                        model.c_str(),
+                        endpoint,
+                        sub_field_apikey_.c_str());
+                };
+
+                // helper: reload field values from config for the active provider type
+                const auto reload_fields = [&]() {
+                    if (provider_sub_type_idx_ == 5 || provider_sub_type_idx_ == 6) {
+                        const char* mp = amadeus_native_provider_current_model_path();
+                        sub_field_model_ = mp ? mp : "";
+                    } else {
+                        const char* m = amadeus_native_provider_current_model();
+                        sub_field_model_ = m ? m : "";
+                    }
+                    const char* ep = amadeus_native_provider_current_endpoint();
+                    sub_field_endpoint_ = ep ? ep : "";
+                    const char* ak = amadeus_native_provider_current_apikey();
+                    sub_field_apikey_ = ak ? ak : "";
+                };
+
+                if (sub_editing_) {
+                    // Text edit mode: only backspace and enter are handled here;
+                    // printable chars come via HandleChar.
+                    switch (key) {
+                    case GLFW_KEY_ESCAPE:
+                        // Cancel edit: restore from saved field value
+                        if (std::string* field = active_field()) {
+                            sub_edit_buffer_ = *field;
+                        }
+                        sub_editing_ = false;
+                        return;
+                    case GLFW_KEY_ENTER:
+                    case GLFW_KEY_KP_ENTER: {
+                        // Confirm: save buffer into field (no config write yet — use Save row)
+                        if (std::string* field = active_field()) {
+                            *field = sub_edit_buffer_;
+                        }
+                        sub_editing_ = false;
+                        // When Ollama endpoint is confirmed, auto-fetch models
+                        if (provider_sub_type_idx_ == 4 && provider_sub_row_ == 1) {
+                            const std::string& ep = sub_field_endpoint_.empty()
+                                ? std::string("http://127.0.0.1:11434")
+                                : sub_field_endpoint_;
+                            amadeus_native_ollama_fetch_models(ep.c_str());
+                            ollama_model_idx_ = 0;
+                        }
+                        return;
+                    }
+                    case GLFW_KEY_BACKSPACE:
+                        PopUtf8Codepoint(&sub_edit_buffer_);
+                        return;
+                    default:
+                        return;
+                    }
+                }
+
+                // Navigation mode (not editing)
+                switch (key) {
+                case GLFW_KEY_ESCAPE:
+                    provider_sub_open_ = false;
+                    return;
+                case GLFW_KEY_UP:
+                    if (provider_sub_row_ > 0) {
+                        --provider_sub_row_;
+                    }
+                    return;
+                case GLFW_KEY_DOWN:
+                    if (provider_sub_row_ < sub_max_row()) {
+                        ++provider_sub_row_;
+                    }
+                    return;
+                case GLFW_KEY_LEFT:
+                case GLFW_KEY_RIGHT: {
+                    const int dir = (key == GLFW_KEY_RIGHT) ? 1 : -1;
+                    if (provider_sub_row_ == 0) {
+                        // Cycle provider type
+                        const int total = amadeus_native_provider_type_count();
+                        if (total > 0) {
+                            provider_sub_type_idx_ =
+                                (provider_sub_type_idx_ + dir + total) % total;
+                            provider_sub_row_ = 0;
+                            ollama_model_idx_ = 0;
+                            // Load saved values for the new type from config
+                            reload_fields();
+                            // Trigger model fetch when switching to Ollama
+                            if (provider_sub_type_idx_ == 4) {
+                                const std::string& ep = sub_field_endpoint_.empty()
+                                    ? std::string("http://127.0.0.1:11434")
+                                    : sub_field_endpoint_;
+                                amadeus_native_ollama_fetch_models(ep.c_str());
+                                // Restore previously-selected model index from config
+                                const char* cur = amadeus_native_provider_current_model();
+                                if (cur && *cur) {
+                                    const int idx = amadeus_native_ollama_model_index(cur);
+                                    if (idx >= 0) ollama_model_idx_ = idx;
+                                }
+                            }
+                        }
+                    } else if (provider_sub_type_idx_ == 4 && provider_sub_row_ == 2) {
+                        // Ollama: cycle through fetched model list (no config write until Save)
+                        const int count = amadeus_native_ollama_model_count();
+                        if (count > 0) {
+                            ollama_model_idx_ = (ollama_model_idx_ + dir + count) % count;
+                        }
+                    }
+                    // Left/Right on other text fields does nothing special (Enter to edit)
+                    return;
+                }
+                case GLFW_KEY_ENTER:
+                case GLFW_KEY_KP_ENTER: {
+                    if (provider_sub_row_ == sub_max_row()) {
+                        // Save row: write all staged changes to config and close
+                        apply_config();
+                        provider_sub_open_ = false;
+                    } else if (
+                        (provider_sub_type_idx_ == 5 && provider_sub_row_ == 2) ||
+                        (provider_sub_type_idx_ == 6 && provider_sub_row_ == 1)) {
+                        // Download row: kick off GGUF download if not already running
+                        const int status = amadeus_native_gguf_download_status();
+                        if (status != 1) {
+                            amadeus_native_gguf_download_start(provider_sub_type_idx_);
+                        }
+                    } else if (provider_sub_row_ > 0) {
+                        // Text field: start editing
+                        if (std::string* field = active_field()) {
+                            sub_edit_buffer_ = *field;
+                            sub_editing_ = true;
+                        }
+                    }
+                    return;
+                }
+                default:
+                    return;
+                }
+            }
+
             switch (key) {
             case GLFW_KEY_ESCAPE:
                 settings_open_ = false;
@@ -903,9 +1176,9 @@ void AmadeusOverlay::HandleKey(GLFWwindow* window, int key, int action, int mods
                 }
                 return;
             case GLFW_KEY_DOWN: {
-                // Rows: 0=Mode, 1=Voice Language, [2=Sensitivity, 3=Device, 4=Gain, 5=Gate, 6=Compressor] (stt)
-                // Agent info is read-only and not navigable
-                const int max_row = stt_enabled_ ? 6 : 1;
+                // Rows: 0=Mode, 1=Voice Language, 2=Provider
+                //       [3=Sensitivity, 4=Device, 5=Gain, 6=Gate, 7=Compressor] (stt only)
+                const int max_row = stt_enabled_ ? 7 : 2;
                 if (settings_row_ < max_row) {
                     ++settings_row_;
                 }
@@ -934,13 +1207,44 @@ void AmadeusOverlay::HandleKey(GLFWwindow* window, int key, int action, int mods
                     break;
                 }
                 case 2: {
-                    // Microphone Sensitivity
+                    // Open provider sub-panel; load current config values.
+                    provider_sub_type_idx_ = amadeus_native_provider_active_type_index();
+                    provider_sub_row_ = 0;
+                    sub_editing_ = false;
+                    ollama_model_idx_ = 0;
+                    if (provider_sub_type_idx_ == 5 || provider_sub_type_idx_ == 6) {
+                        const char* mp = amadeus_native_provider_current_model_path();
+                        sub_field_model_ = mp ? mp : "";
+                    } else {
+                        const char* m = amadeus_native_provider_current_model();
+                        sub_field_model_ = m ? m : "";
+                    }
+                    const char* ep = amadeus_native_provider_current_endpoint();
+                    sub_field_endpoint_ = ep ? ep : "";
+                    const char* ak = amadeus_native_provider_current_apikey();
+                    sub_field_apikey_ = ak ? ak : "";
+                    // If opening on Ollama, fetch models immediately
+                    if (provider_sub_type_idx_ == 4) {
+                        const std::string base = sub_field_endpoint_.empty()
+                            ? "http://127.0.0.1:11434" : sub_field_endpoint_;
+                        amadeus_native_ollama_fetch_models(base.c_str());
+                        const char* cur = amadeus_native_provider_current_model();
+                        if (cur && *cur) {
+                            const int idx = amadeus_native_ollama_model_index(cur);
+                            if (idx >= 0) ollama_model_idx_ = idx;
+                        }
+                    }
+                    provider_sub_open_ = true;
+                    break;
+                }
+                case 3: {
+                    // Microphone Sensitivity (only when STT available)
                     const int s = static_cast<int>(stt_sensitivity_) + dir;
                     stt_sensitivity_ = static_cast<VadSensitivity>(std::max(0, std::min(2, s)));
                     amadeus_native_stt_set_sensitivity(static_cast<int>(stt_sensitivity_));
                     break;
                 }
-                case 3: {
+                case 4: {
                     // Mic Device
                     const int count = amadeus_native_stt_device_count();
                     if (count > 0) {
@@ -950,20 +1254,20 @@ void AmadeusOverlay::HandleKey(GLFWwindow* window, int key, int action, int mods
                     }
                     break;
                 }
-                case 4: {
+                case 5: {
                     // Mic Gain: 9 steps, -12..+12 dB in 3 dB increments (index 4 = 0 dB)
                     mic_gain_step_ = std::max(0, std::min(8, mic_gain_step_ + dir));
                     amadeus_native_set_mic_gain_db(static_cast<float>((mic_gain_step_ - 4) * 3));
                     break;
                 }
-                case 5: {
+                case 6: {
                     // Noise Gate: Off / Low / Medium / High
                     mic_gate_step_ = std::max(0, std::min(3, mic_gate_step_ + dir));
                     const float gate_thresholds[] = { 0.0f, 0.005f, 0.010f, 0.020f };
                     amadeus_native_set_mic_gate(gate_thresholds[mic_gate_step_]);
                     break;
                 }
-                case 6: {
+                case 7: {
                     // Compressor: Off / Light / Medium / Heavy
                     mic_comp_step_ = std::max(0, std::min(3, mic_comp_step_ + dir));
                     // {threshold_db, ratio}
@@ -980,7 +1284,7 @@ void AmadeusOverlay::HandleKey(GLFWwindow* window, int key, int action, int mods
                 return;
             }
             default:
-                return;
+                break;
             }
         }
     }
@@ -989,7 +1293,11 @@ void AmadeusOverlay::HandleKey(GLFWwindow* window, int key, int action, int mods
         const char* clipboard = glfwGetClipboardString(window);
         if (clipboard != nullptr) {
             std::lock_guard<std::mutex> lock(mutex_);
-            input_.append(clipboard);
+            if (provider_sub_open_ && sub_editing_) {
+                sub_edit_buffer_.append(clipboard);
+            } else {
+                input_.append(clipboard);
+            }
         }
         return;
     }
@@ -1028,6 +1336,15 @@ void AmadeusOverlay::HandleChar(unsigned int codepoint) {
     }
 
     std::lock_guard<std::mutex> lock(mutex_);
+
+    // While a provider text field is active, route input there.
+    if (provider_sub_open_ && sub_editing_) {
+        if (sub_edit_buffer_.size() < 1024) {
+            AppendUtf8Codepoint(&sub_edit_buffer_, codepoint);
+        }
+        return;
+    }
+
     if (input_.size() >= 2048) {
         return;
     }
@@ -1101,6 +1418,19 @@ void AmadeusOverlay::Update() {
             && subtitle_hide_deadline_seconds_ > 0.0
             && now >= subtitle_hide_deadline_seconds_) {
             ClearSubtitleBubbleLocked();
+        }
+
+        // Keep status line updated while the built-in model is downloading.
+        if (!request_in_flight_ && !reveal_active_) {
+            const int dl = amadeus_native_gguf_download_status();
+            if (dl == 1) {
+                const int pct = amadeus_native_gguf_download_progress();
+                status_ = "Downloading Amadeus model... " + std::to_string(pct) + "%";
+            } else if (dl == 2 && status_.rfind("Downloading", 0) == 0) {
+                status_ = "Amadeus model ready. Type a message to start.";
+            } else if (dl == 3 && status_.rfind("Downloading", 0) == 0) {
+                status_ = "Model download failed. Open Settings to retry.";
+            }
         }
     }
 

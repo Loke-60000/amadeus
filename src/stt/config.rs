@@ -20,8 +20,12 @@ pub struct SttRuntimeConfig {
     pub min_speech_ms: u64,
 }
 
-pub fn discover_stt_runtime_config(assets_root: &Path) -> SttRuntimeConfig {
-    let enabled = !env_flag("AMADEUS_STT_DISABLED");
+/// Discover STT runtime config.  `services_enabled` overrides `AMADEUS_STT_DISABLED` when set.
+pub fn discover_stt_runtime_config(
+    assets_root: &Path,
+    services_enabled: Option<bool>,
+) -> SttRuntimeConfig {
+    let enabled = services_enabled.unwrap_or_else(|| !env_flag("AMADEUS_STT_DISABLED"));
     let model_path = env::var("AMADEUS_STT_MODEL")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {

@@ -13,8 +13,9 @@ pub struct TtsRuntimeConfig {
     pub allow_cpu_fallback: bool,
 }
 
-pub fn discover_tts_runtime_config() -> TtsRuntimeConfig {
-    let enabled = !env_flag("AMADEUS_TTS_DISABLED");
+/// Discover TTS runtime config.  `services_enabled` overrides `AMADEUS_TTS_DISABLED` when set.
+pub fn discover_tts_runtime_config(services_enabled: Option<bool>) -> TtsRuntimeConfig {
+    let enabled = services_enabled.unwrap_or_else(|| !env_flag("AMADEUS_TTS_DISABLED"));
 
     TtsRuntimeConfig {
         enabled,

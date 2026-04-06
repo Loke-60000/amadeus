@@ -1,12 +1,12 @@
 use anyhow::{Context, Result};
-use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
-use serde_json::{Value, json};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE};
+use serde_json::{json, Value};
 
 use crate::agent::{
     config::AgentRuntimeConfig,
     llm::common::{
-        LlmClientConfig, ModelClient, ModelTurn, anthropic_tools, append_text, ensure_success,
-        make_tool_call, parse_arguments_object,
+        anthropic_tools, append_text, ensure_success, make_tool_call, parse_arguments_object,
+        LlmClientConfig, ModelClient, ModelTurn,
     },
     session::{SessionMessage, SessionRole},
     tools::ToolDefinition,

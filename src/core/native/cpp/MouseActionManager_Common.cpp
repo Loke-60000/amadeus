@@ -34,6 +34,13 @@ void MouseActionManager_Common::ReleaseInstance()
 }
 
 MouseActionManager_Common::MouseActionManager_Common()
+    : _userModel(nullptr)
+    , _TouchManager(nullptr)
+    , _captured(false)
+    , _mouseX(0.0f)
+    , _mouseY(0.0f)
+    , _viewMatrix(nullptr)
+    , _deviceToScreen(nullptr)
 {
 }
 
@@ -65,7 +72,7 @@ void MouseActionManager_Common::ViewInitialize(int windowWidth, int windowHeight
 
 void MouseActionManager_Common::OnDrag(Csm::csmFloat32 x, Csm::csmFloat32 y)
 {
-    _userModel->SetDragging(x, y);
+    if (_userModel) _userModel->SetDragging(x, y);
 }
 
 void MouseActionManager_Common::OnTouchesBegan(float px, float py)
@@ -75,6 +82,8 @@ void MouseActionManager_Common::OnTouchesBegan(float px, float py)
 
 void MouseActionManager_Common::OnTouchesMoved(float px, float py)
 {
+    if (!_userModel) return;
+
     float screenX = _deviceToScreen->TransformX(_TouchManager->GetX()); // 論理座標変換した座標を取得。
     float viewX = _viewMatrix->InvertTransformX(screenX); // 拡大、縮小、移動後の値。
 
