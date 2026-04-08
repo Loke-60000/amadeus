@@ -30,7 +30,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Run tests
-        run: cargo test --locked --no-default-features
+        run: cargo test --locked --no-default-features -p amadeus-backend -p amadeus-client -p amadeus-desktop
 
 
         
