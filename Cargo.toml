@@ -1,53 +1,7 @@
-[package]
-name = "amadeus-rs"
-version = "0.1.0"
-edition = "2024"
-
-[features]
-default = ["cuda", "stt-cuda", "local-llm", "llm-cuda"]
-cuda = ["qwen3-tts/cuda"]
-flash-attn = ["cuda", "qwen3-tts/flash-attn"]
-metal = ["qwen3-tts/metal"]
-mkl = ["qwen3-tts/mkl"]
-accelerate = ["qwen3-tts/accelerate"]
-stt-vulkan = ["whisper-rs/vulkan"]
-stt-cuda = ["whisper-rs/cuda"]
-# Enable local llama.cpp inference.  Requires the C++ bridge to be compiled
-# (third_party/llama.cpp submodule + build.rs cmake build).
-local-llm = []
-# GPU backends for local llama.cpp inference (mutually exclusive with each other).
-llm-vulkan = ["local-llm"]   # Vulkan — works on AMD, Intel, and NVIDIA
-llm-cuda   = ["local-llm"]   # CUDA   — NVIDIA only
-
-[dependencies]
-anyhow = "1.0"
-html2text = "0.12"
-uuid = { version = "1", features = ["v4"] }
-candle-core = "0.9"
-candle-nn = "0.9"
-cpal = "0.15"
-whisper-rs = { version = "0.16", default-features = false }
-globset = "0.4.16"
-hound = "3.5"
-libc = "0.2"
-lindera = { version = "2.3.4", features = ["embed-ipadic"] }
-pulldown-cmark = "0.13"
-qwen3-tts = { git = "https://github.com/TrevorS/qwen3-tts-rs", features = ["hub"] }
-regex = "1.12.2"
-reqwest = { version = "0.12.24", default-features = false, features = ["blocking", "json", "rustls-tls"] }
-tiny_http = "0.12"
-rodio = "0.20.1"
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.145"
-tao = "0.35.0"
-thiserror = "1.0.69"
-walkdir = "2.5.0"
-wry = "0.55.0"
-
-[dev-dependencies]
-tempfile = "3.23.0"
-
-[build-dependencies]
-cc = "1.1"
-cmake = "0.1"
-pkg-config = "0.3"
+[workspace]
+members  = [
+    "crates/amadeus-backend",
+    "crates/amadeus-client",
+    "crates/amadeus-desktop",
+]
+resolver = "2"

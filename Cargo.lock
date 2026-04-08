@@ -66,18 +66,37 @@ dependencies = [
 ]
 
 [[package]]
-name = "amadeus-rs"
+name = "amadeus-backend"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "cc",
+ "cmake",
+ "globset",
+ "html2text",
+ "libc",
+ "pulldown-cmark",
+ "regex",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tiny_http",
+ "uuid",
+ "walkdir",
+]
+
+[[package]]
+name = "amadeus-client"
+version = "0.1.0"
+dependencies = [
+ "amadeus-backend",
  "anyhow",
  "candle-core",
  "candle-nn",
  "cc",
- "cmake",
  "cpal",
- "globset",
  "hound",
- "html2text",
  "libc",
  "lindera",
  "pkg-config",
@@ -88,13 +107,24 @@ dependencies = [
  "rodio",
  "serde",
  "serde_json",
- "tao",
- "tempfile",
  "thiserror 1.0.69",
- "tiny_http",
- "uuid",
- "walkdir",
  "whisper-rs",
+]
+
+[[package]]
+name = "amadeus-desktop"
+version = "0.1.0"
+dependencies = [
+ "amadeus-backend",
+ "amadeus-client",
+ "anyhow",
+ "hound",
+ "reqwest 0.12.28",
+ "rodio",
+ "serde",
+ "serde_json",
+ "tao",
+ "thiserror 1.0.69",
  "wry",
 ]
 
@@ -5354,19 +5384,6 @@ name = "target-lexicon"
 version = "0.12.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "61c41af27dd6d1e27b1b16b489db798443478cef1f06a660c96db617ba5de3b1"
-
-[[package]]
-name = "tempfile"
-version = "3.27.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
-dependencies = [
- "fastrand",
- "getrandom 0.4.2",
- "once_cell",
- "rustix",
- "windows-sys 0.61.2",
-]
 
 [[package]]
 name = "tendril"

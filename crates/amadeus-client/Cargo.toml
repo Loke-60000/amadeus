@@ -1,0 +1,37 @@
+[package]
+name = "amadeus-client"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default        = ["cuda", "stt-cuda"]
+cuda           = ["qwen3-tts/cuda"]
+flash-attn     = ["cuda", "qwen3-tts/flash-attn"]
+metal          = ["qwen3-tts/metal"]
+mkl            = ["qwen3-tts/mkl"]
+accelerate     = ["qwen3-tts/accelerate"]
+stt-vulkan     = ["whisper-rs/vulkan"]
+stt-cuda       = ["whisper-rs/cuda"]
+
+[dependencies]
+amadeus-backend = { path = "../amadeus-backend" }
+anyhow       = "1.0"
+candle-core  = "0.9"
+candle-nn    = "0.9"
+cpal         = "0.15"
+hound        = "3.5"
+lindera      = { version = "2.3.4", features = ["embed-ipadic"] }
+libc         = "0.2"
+pulldown-cmark = "0.13"
+qwen3-tts    = { git = "https://github.com/TrevorS/qwen3-tts-rs", features = ["hub"] }
+regex        = "1.12.2"
+reqwest      = { version = "0.12.24", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+rodio        = "0.20.1"
+serde        = { version = "1.0.228", features = ["derive"] }
+serde_json   = "1.0.145"
+thiserror    = "1.0"
+whisper-rs   = { version = "0.16", default-features = false }
+
+[build-dependencies]
+cc         = "1.1"
+pkg-config = "0.3"

@@ -1,0 +1,25 @@
+mod app;
+pub(crate) mod autonomy;
+pub mod backend;
+mod boundary;
+mod cli;
+pub mod config;
+pub(crate) mod context;
+pub mod llm;
+pub(crate) mod memory;
+pub(crate) mod mcp;
+pub(crate) mod planning;
+mod prompt;
+pub mod providers;
+mod session;
+pub mod settings_command;
+pub mod serve;
+pub(crate) mod skills;
+pub(crate) mod task;
+pub(crate) mod tools;
+pub mod ui;
+mod workspace;
+
+pub use backend::{ConversationBackend, ExternalAgentClient};
+pub use cli::run_cli;
+pub use llm::{ModelToolCall, TextStreamSink};
