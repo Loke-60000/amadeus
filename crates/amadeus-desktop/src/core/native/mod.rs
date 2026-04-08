@@ -223,9 +223,10 @@ mod imp {
         ///   2. Callers can clone the Arc and **release the lock before running inference**,
         ///      preventing long LLM turns from blocking the render thread.
         agent_service: Mutex<Option<Arc<dyn ConversationBackend>>>,
-        /// True when the app was started with `AMADEUS_EXTERNAL_AGENT_URL` set; in that case
-        /// provider-selection and config-save flows skip rebuilding a local AgentUiService.
+        /// True when the app is using an external backend agent rather than a local one.
         use_external_agent: bool,
+        /// The URL of the external backend agent, if applicable.
+        external_agent_url: Option<String>,
         voice_player: Option<NativeVoicePlayer>,
         stt_service: Option<Arc<SttService>>,
         voice_enabled: bool,
@@ -248,19 +249,30 @@ mod imp {
             let mut services_stt: Option<bool> = None;
 
             // Prefer an external agent when AMADEUS_EXTERNAL_AGENT_URL is set; otherwise
-            // fall back to the built-in in-process AgentUiService.
-            let use_external_agent = std::env::var("AMADEUS_EXTERNAL_AGENT_URL").is_ok();
+            // fall back to a saved URL in config.json, or the built-in in-process agent.
+            let ext_url_from_env = std::env::var("AMADEUS_EXTERNAL_AGENT_URL").ok();
+            let ext_url_from_config = if ext_url_from_env.is_none() {
+                let cfg = read_config_json(workspace_root);
+                cfg.get("externalAgentUrl")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+            } else {
+                None
+            };
+            let external_agent_url: Option<String> = ext_url_from_env.or(ext_url_from_config);
+            let use_external_agent = external_agent_url.is_some();
 
             let agent_service: Option<Arc<dyn ConversationBackend>> = if use_external_agent {
-                match ExternalAgentClient::from_env() {
+                let url = external_agent_url.clone().unwrap();
+                match ExternalAgentClient::from_url(url.clone(), None) {
                     Some(client) => {
-                        let url = std::env::var("AMADEUS_EXTERNAL_AGENT_URL").unwrap_or_default();
                         provider = format!("external @ {url}");
                         model = "remote".to_string();
                         Some(Arc::new(client))
                     }
                     None => {
-                        agent_error = Some("AMADEUS_EXTERNAL_AGENT_URL is set but the client could not be constructed".to_string());
+                        agent_error = Some("external agent URL could not be used to construct client".to_string());
                         None
                     }
                 }
@@ -356,9 +368,44 @@ mod imp {
             };
             let _ = NATIVE_RUNTIME_INFO.set(sanitize_c_string(&runtime_info));
 
+            // Restore persisted UI preferences that were saved across sessions.
+            let saved_ui = read_config_json(workspace_root)
+                .get("ui")
+                .cloned()
+                .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+            if let Some(stt) = &stt_service {
+                if let Some(v) = saved_ui.get("sttSensitivity").and_then(|v| v.as_i64()) {
+                    stt.set_sensitivity(v as i32);
+                }
+                if let Some(v) = saved_ui.get("sttDeviceIndex").and_then(|v| v.as_i64()) {
+                    stt.set_device(v as usize);
+                }
+                if let Some(v) = saved_ui.get("micGainDb").and_then(|v| v.as_f64()) {
+                    stt.set_mic_gain_db(v as f32);
+                }
+                if let Some(v) = saved_ui.get("micGate").and_then(|v| v.as_f64()) {
+                    stt.set_mic_gate(v as f32);
+                }
+                if let (Some(t), Some(r)) = (
+                    saved_ui.get("micCompressorThresholdDb").and_then(|v| v.as_f64()),
+                    saved_ui.get("micCompressorRatio").and_then(|v| v.as_f64()),
+                ) {
+                    stt.set_mic_compressor(t as f32, r as f32);
+                }
+            }
+            if let Some(lang) = saved_ui.get("voiceLanguage").and_then(|v| v.as_i64()) {
+                let value = match lang {
+                    1 => VOICE_LANG_ENGLISH,
+                    2 => VOICE_LANG_JAPANESE,
+                    _ => VOICE_LANG_AUTO,
+                };
+                NATIVE_VOICE_LANG_PREF.store(value, Ordering::Relaxed);
+            }
+
             Self {
                 agent_service: Mutex::new(agent_service),
                 use_external_agent,
+                external_agent_url,
                 voice_player,
                 stt_service,
                 voice_enabled,
@@ -1876,6 +1923,7 @@ mod imp {
                 stt.set_sensitivity(level);
             }
         }
+        write_ui_config_key("sttSensitivity", Value::Number(level.into()));
     }
 
     #[unsafe(no_mangle)]
@@ -1886,6 +1934,7 @@ mod imp {
             _ => VOICE_LANG_AUTO,
         };
         NATIVE_VOICE_LANG_PREF.store(value, Ordering::Relaxed);
+        write_ui_config_key("voiceLanguage", Value::Number(lang.into()));
     }
 
     #[unsafe(no_mangle)]
@@ -1928,6 +1977,7 @@ mod imp {
                 stt.set_device(index as usize);
             }
         }
+        write_ui_config_key("sttDeviceIndex", Value::Number(index.into()));
     }
 
     #[unsafe(no_mangle)]
@@ -1949,6 +1999,9 @@ mod imp {
                 stt.set_mic_gain_db(db);
             }
         }
+        if let Some(n) = serde_json::Number::from_f64(db as f64) {
+            write_ui_config_key("micGainDb", Value::Number(n));
+        }
     }
 
     #[unsafe(no_mangle)]
@@ -1958,6 +2011,9 @@ mod imp {
                 stt.set_mic_gate(threshold);
             }
         }
+        if let Some(n) = serde_json::Number::from_f64(threshold as f64) {
+            write_ui_config_key("micGate", Value::Number(n));
+        }
     }
 
     #[unsafe(no_mangle)]
@@ -1966,6 +2022,13 @@ mod imp {
             if let Some(stt) = &rt.stt_service {
                 stt.set_mic_compressor(threshold_db, ratio);
             }
+        }
+        if let (Some(t), Some(r)) = (
+            serde_json::Number::from_f64(threshold_db as f64),
+            serde_json::Number::from_f64(ratio as f64),
+        ) {
+            write_ui_config_key("micCompressorThresholdDb", Value::Number(t));
+            write_ui_config_key("micCompressorRatio", Value::Number(r));
         }
     }
 
@@ -2148,6 +2211,21 @@ mod imp {
             .as_object_mut()
             .expect("services must be a JSON object")
             .insert(key.into(), value);
+    }
+
+    fn write_ui_config_key(key: &str, value: Value) {
+        let Some(root_path) = workspace_root() else { return };
+        let config_path = root_path.join(amadeus_backend::config::DEFAULT_CONFIG_PATH);
+        let Ok(mut json) = load_or_create_config_json(&config_path) else { return };
+        let Some(root) = json.as_object_mut() else { return };
+        root.entry("ui")
+            .or_insert_with(|| Value::Object(serde_json::Map::new()))
+            .as_object_mut()
+            .expect("ui must be a JSON object")
+            .insert(key.into(), value);
+        if let Ok(pretty) = serde_json::to_string_pretty(&json) {
+            let _ = fs::write(&config_path, pretty + "\n");
+        }
     }
 
     fn workspace_root() -> Option<PathBuf> {
@@ -2928,6 +3006,63 @@ mod imp {
             }
         };
         initialize_native_ui_runtime(&workspace_root);
+    }
+
+    // ── External agent mode ────────────────────────────────────────────────────
+
+    /// Returns 1 if the app is running in external-agent (client-only) mode, 0 otherwise.
+    /// C++ uses this to show a simplified settings panel with just the backend URL.
+    #[unsafe(no_mangle)]
+    pub extern "C" fn amadeus_native_is_external_agent() -> i32 {
+        native_ui_runtime()
+            .map(|rt| if rt.use_external_agent { 1 } else { 0 })
+            .unwrap_or(0)
+    }
+
+    /// Returns the current external agent URL, or null if not in external-agent mode.
+    /// The pointer is valid until the next call on the same thread.
+    #[unsafe(no_mangle)]
+    pub extern "C" fn amadeus_native_external_agent_url() -> *const c_char {
+        thread_local! {
+            static SCRATCH: std::cell::RefCell<Option<CString>> = const { std::cell::RefCell::new(None) };
+        }
+        let url = native_ui_runtime()
+            .and_then(|rt| rt.external_agent_url.as_deref())
+            .unwrap_or("");
+        SCRATCH.with(|s| {
+            let cs = sanitize_c_string(url);
+            let ptr = cs.as_ptr();
+            *s.borrow_mut() = Some(cs);
+            ptr
+        })
+    }
+
+    /// Saves `url` as the external agent backend URL in `.amadeus/config.json`.
+    /// Pass an empty string to clear the saved URL (disabling external-agent mode on next
+    /// restart). Takes effect on the next application launch.
+    #[unsafe(no_mangle)]
+    pub extern "C" fn amadeus_native_set_external_agent_url(url: *const c_char) {
+        let url_str: String = unsafe {
+            if url.is_null() {
+                return;
+            }
+            std::ffi::CStr::from_ptr(url)
+                .to_str()
+                .unwrap_or("")
+                .to_string()
+        };
+        let Some(root_path) = workspace_root() else { return };
+        let config_path = root_path.join(amadeus_backend::config::DEFAULT_CONFIG_PATH);
+        let Ok(mut json) = load_or_create_config_json(&config_path) else { return };
+        let Some(root) = json.as_object_mut() else { return };
+        if url_str.is_empty() {
+            root.remove("externalAgentUrl");
+        } else {
+            root.insert("externalAgentUrl".into(), Value::String(url_str));
+        }
+        if let Ok(pretty) = serde_json::to_string_pretty(&json) {
+            let _ = fs::write(&config_path, pretty + "\n");
+        }
     }
 
     mod tests {

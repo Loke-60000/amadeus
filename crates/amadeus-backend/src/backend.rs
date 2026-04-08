@@ -87,13 +87,27 @@ impl ExternalAgentClient {
     /// not set.
     pub fn from_env() -> Option<Self> {
         let base_url = std::env::var(ENV_EXTERNAL_AGENT_URL).ok()?;
-        let base_url = base_url.trim_end_matches('/').to_string();
         let api_key = std::env::var(ENV_EXTERNAL_AGENT_KEY).ok();
+        Self::from_url(base_url, api_key)
+    }
+
+    /// Build a client from an explicit URL (and optional API key).
+    /// Returns `None` if the URL is empty or the HTTP client cannot be built.
+    pub fn from_url(base_url: String, api_key: Option<String>) -> Option<Self> {
+        if base_url.is_empty() {
+            return None;
+        }
+        let base_url = base_url.trim_end_matches('/').to_string();
         let http = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(120))
             .build()
             .ok()?;
         Some(Self { base_url, api_key, http })
+    }
+
+    /// Returns the base URL this client is configured to reach.
+    pub fn base_url(&self) -> &str {
+        &self.base_url
     }
 
     fn post_turn(&self, request: &TurnRequest) -> Result<String> {
