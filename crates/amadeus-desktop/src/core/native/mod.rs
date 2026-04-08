@@ -137,13 +137,11 @@ mod imp {
     }
 
     pub fn run_native_viewer_with_logs_terminal(show_logs_terminal: bool) -> Result<()> {
-        let workspace_root =
-            env::current_dir().context("failed to determine the workspace root")?;
-        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let assets_root = manifest_dir.join("assets");
+        let workspace_root = crate_workspace_root();
+        let assets_root = workspace_root.join("assets");
         let live2d = Live2dPaths::discover(&assets_root)
             .context("failed to discover Live2D model assets")?;
-        let runtime_dir = prepare_shader_runtime(&manifest_dir)?;
+        let runtime_dir = prepare_shader_runtime(&workspace_root)?;
         configure_native_log_output(&runtime_dir, show_logs_terminal)?;
 
         // Stash workspace root so amadeus_native_init_services() (called by C++ after the
@@ -238,8 +236,7 @@ mod imp {
 
     impl NativeUiRuntime {
         fn initialize(workspace_root: &Path) -> Self {
-            let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-            let assets_root = manifest_dir.join("assets");
+            let assets_root = workspace_root.join("assets");
 
             let mut provider = "unconfigured".to_string();
             let mut model = "(unset)".to_string();
@@ -1431,10 +1428,10 @@ mod imp {
         }
     }
 
-    fn prepare_shader_runtime(manifest_dir: &Path) -> Result<PathBuf> {
-        let runtime_dir = manifest_dir.join("target").join("amadeus-native-runtime");
-        let font_source_dir = manifest_dir.join("assets").join(NATIVE_FONT_DIR_NAME);
-        let shader_source_dir = resolve_cubism_framework_src(manifest_dir)?
+    fn prepare_shader_runtime(workspace_root: &Path) -> Result<PathBuf> {
+        let runtime_dir = workspace_root.join("target").join("amadeus-native-runtime");
+        let font_source_dir = workspace_root.join("assets").join(NATIVE_FONT_DIR_NAME);
+        let shader_source_dir = resolve_cubism_framework_src(workspace_root)?
             .join("Rendering")
             .join("OpenGL")
             .join("Shaders")
@@ -1455,7 +1452,7 @@ mod imp {
             )
         })?;
 
-        let logo_src = manifest_dir.join("assets").join("app").join("logo.png");
+        let logo_src = workspace_root.join("assets").join("app").join("logo.png");
         if logo_src.exists() {
             std::fs::copy(&logo_src, runtime_dir.join("logo.png"))
                 .context("failed to copy app logo to runtime directory")?;
@@ -1464,9 +1461,9 @@ mod imp {
         Ok(runtime_dir)
     }
 
-    fn resolve_cubism_framework_src(manifest_dir: &Path) -> Result<PathBuf> {
+    fn resolve_cubism_framework_src(workspace_root: &Path) -> Result<PathBuf> {
         if let Some(override_dir) = env::var_os(CUBISM_SDK_DIR_ENV) {
-            let override_dir = normalize_resource_path(manifest_dir, PathBuf::from(override_dir));
+            let override_dir = normalize_resource_path(workspace_root, PathBuf::from(override_dir));
             if override_dir.exists() {
                 return Ok(override_dir.join("Framework").join("src"));
             }
@@ -1478,7 +1475,7 @@ mod imp {
         }
 
         if let Some(override_dir) = env::var_os(CUBISM_FRAMEWORK_DIR_ENV) {
-            let override_dir = normalize_resource_path(manifest_dir, PathBuf::from(override_dir));
+            let override_dir = normalize_resource_path(workspace_root, PathBuf::from(override_dir));
             if override_dir.exists() {
                 return Ok(override_dir);
             }
@@ -1489,7 +1486,7 @@ mod imp {
             );
         }
 
-        let tracked_dir = manifest_dir
+        let tracked_dir = workspace_root
             .join(THIRD_PARTY_DIR_NAME)
             .join(CUBISM_FRAMEWORK_DIR_NAME)
             .join("src");
@@ -1497,7 +1494,7 @@ mod imp {
             return Ok(tracked_dir);
         }
 
-        let preferred_dir = manifest_dir
+        let preferred_dir = workspace_root
             .join(LOCAL_RESOURCE_DIR_NAME)
             .join(CUBISM_SDK_DIR_NAME)
             .join("Framework")
@@ -1506,7 +1503,7 @@ mod imp {
             return Ok(preferred_dir);
         }
 
-        let legacy_dir = manifest_dir
+        let legacy_dir = workspace_root
             .join(CUBISM_SDK_DIR_NAME)
             .join("Framework")
             .join("src");
@@ -1522,12 +1519,23 @@ mod imp {
         )
     }
 
-    fn normalize_resource_path(manifest_dir: &Path, candidate: PathBuf) -> PathBuf {
+    fn normalize_resource_path(workspace_root: &Path, candidate: PathBuf) -> PathBuf {
         if candidate.is_absolute() {
             candidate
         } else {
-            manifest_dir.join(candidate)
+            workspace_root.join(candidate)
         }
+    }
+
+    /// Returns the Cargo workspace root.
+    ///
+    /// `CARGO_MANIFEST_DIR` is baked in at compile time as `crates/amadeus-desktop`.
+    /// The workspace root is two levels above that directory.
+    fn crate_workspace_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..").join("..")
+            .canonicalize()
+            .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join(".."))
     }
 
     fn copy_directory(source_dir: &Path, destination_dir: &Path) -> Result<()> {
@@ -2735,8 +2743,7 @@ mod imp {
     const STT_MODEL_SUBPATH: &str = "models/stt/ggml-large-v3-turbo-q8_0.bin";
 
     fn stt_model_path() -> Option<PathBuf> {
-        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        Some(manifest_dir.join("assets").join(STT_MODEL_SUBPATH))
+        Some(crate_workspace_root().join("assets").join(STT_MODEL_SUBPATH))
     }
 
     /// 1 if the STT model file exists on disk, 0 otherwise.
