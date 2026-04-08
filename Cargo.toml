@@ -35,6 +35,7 @@ pulldown-cmark = "0.13"
 qwen3-tts = { git = "https://github.com/TrevorS/qwen3-tts-rs", features = ["hub"] }
 regex = "1.12.2"
 reqwest = { version = "0.12.24", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+tiny_http = "0.12"
 rodio = "0.20.1"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"

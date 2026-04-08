@@ -1,5 +1,6 @@
 mod app;
 pub(crate) mod autonomy;
+pub mod backend;
 mod boundary;
 mod cli;
 pub(crate) mod config;
@@ -11,11 +12,13 @@ mod prompt;
 pub(crate) mod providers;
 mod session;
 pub(crate) mod settings_command;
+pub mod serve;
 pub(crate) mod skills;
 pub(crate) mod task;
 pub(crate) mod tools;
 pub(crate) mod ui;
 mod workspace;
 
+pub use backend::{ConversationBackend, ExternalAgentClient};
 pub use cli::run_cli;
 pub(crate) use llm::{ModelToolCall, TextStreamSink};

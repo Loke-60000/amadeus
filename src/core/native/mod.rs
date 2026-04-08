@@ -26,10 +26,12 @@ mod imp {
 
     use crate::{
         agent::{
+            backend::TurnRequest,
             config::AgentRuntimeConfig,
+            ConversationBackend, ExternalAgentClient,
             providers::ProvidersStore,
             settings_command::{settings_help, SettingsCommand},
-            ui::{AgentUiService, AgentUiTurnRequest},
+            ui::AgentUiService,
             ModelToolCall, TextStreamSink,
         },
         live2d::config::Live2dPaths,
@@ -222,7 +224,10 @@ mod imp {
         ///   1. The service can be (re)initialized after a config save.
         ///   2. Callers can clone the Arc and **release the lock before running inference**,
         ///      preventing long LLM turns from blocking the render thread.
-        agent_service: Mutex<Option<Arc<AgentUiService>>>,
+        agent_service: Mutex<Option<Arc<dyn ConversationBackend>>>,
+        /// True when the app was started with `AMADEUS_EXTERNAL_AGENT_URL` set; in that case
+        /// provider-selection and config-save flows skip rebuilding a local AgentUiService.
+        use_external_agent: bool,
         voice_player: Option<NativeVoicePlayer>,
         stt_service: Option<Arc<SttService>>,
         voice_enabled: bool,
@@ -245,7 +250,24 @@ mod imp {
             let mut services_tts: Option<bool> = None;
             let mut services_stt: Option<bool> = None;
 
-            let agent_service =
+            // Prefer an external agent when AMADEUS_EXTERNAL_AGENT_URL is set; otherwise
+            // fall back to the built-in in-process AgentUiService.
+            let use_external_agent = std::env::var("AMADEUS_EXTERNAL_AGENT_URL").is_ok();
+
+            let agent_service: Option<Arc<dyn ConversationBackend>> = if use_external_agent {
+                match ExternalAgentClient::from_env() {
+                    Some(client) => {
+                        let url = std::env::var("AMADEUS_EXTERNAL_AGENT_URL").unwrap_or_default();
+                        provider = format!("external @ {url}");
+                        model = "remote".to_string();
+                        Some(Arc::new(client))
+                    }
+                    None => {
+                        agent_error = Some("AMADEUS_EXTERNAL_AGENT_URL is set but the client could not be constructed".to_string());
+                        None
+                    }
+                }
+            } else {
                 match AgentRuntimeConfig::load(Some(workspace_root.to_path_buf()), None) {
                     Ok(mut runtime) => {
                         // When local LLM is requested override the provider so
@@ -274,7 +296,8 @@ mod imp {
                         agent_error = Some(error.to_string());
                         None
                     }
-                };
+                }
+            };
 
             let agent_enabled = agent_service.is_some();
 
@@ -338,6 +361,7 @@ mod imp {
 
             Self {
                 agent_service: Mutex::new(agent_service),
+                use_external_agent,
                 voice_player,
                 stt_service,
                 voice_enabled,
@@ -363,7 +387,7 @@ mod imp {
                     .context("the native agent runtime is not configured")?
                     .clone()
             };
-            let response = service.run_turn(AgentUiTurnRequest {
+            let response = service.run_turn(TurnRequest {
                 prompt: prompt.to_string(),
                 session_id: Some(NATIVE_SESSION_ID.to_string()),
                 voice_mode: false,
@@ -394,7 +418,7 @@ mod imp {
             let mut priming_stream =
                 NativeStreamingVoicePrimer::new(stream, self.voice_player.as_ref());
             let response = service.run_turn_streaming(
-                AgentUiTurnRequest {
+                TurnRequest {
                     prompt: prompt.to_string(),
                     session_id: Some(NATIVE_SESSION_ID.to_string()),
                     voice_mode: false,
@@ -452,7 +476,7 @@ mod imp {
 
             let mut voice_stream = SttVoiceEnqueueStream::new(self.voice_player.as_ref());
             let _response = service.run_turn_streaming(
-                AgentUiTurnRequest {
+                TurnRequest {
                     prompt: effective_prompt,
                     session_id: Some(NATIVE_SESSION_ID.to_string()),
                     voice_mode: true,
@@ -2003,6 +2027,10 @@ mod imp {
             guard.select(index as usize)?;
             NATIVE_ACTIVE_PROVIDER_INDEX.store(index, Ordering::Relaxed);
             if let Some(runtime) = native_ui_runtime() {
+                if runtime.use_external_agent {
+                    // External agent — provider selection is a no-op for the local service.
+                    return Ok(());
+                }
                 if let Ok(mut svc_guard) = runtime.agent_service.lock() {
                     if let Some(service) = svc_guard.as_ref() {
                         service.reload_config();
@@ -2016,7 +2044,8 @@ mod imp {
                             }
                             runtime_cfg.normalize_provider_defaults();
                             if runtime_cfg.model.is_some() || runtime_cfg.services.local_llm {
-                                *svc_guard = Some(Arc::new(AgentUiService::new(runtime_cfg)));
+                                *svc_guard =
+                                    Some(Arc::new(AgentUiService::new(runtime_cfg)) as Arc<dyn ConversationBackend>);
                             }
                         }
                     }
@@ -2378,25 +2407,27 @@ mod imp {
                 .with_context(|| format!("failed to write {}", config_path.display()))?;
 
             if let Some(rt) = native_ui_runtime() {
-                let mut guard = rt
-                    .agent_service
-                    .lock()
-                    .map_err(|_| anyhow::anyhow!("agent service mutex poisoned"))?;
-                if let Some(service) = guard.as_ref() {
-                    // Service already exists — just reload config in place.
-                    service.reload_config();
-                } else {
-                    // Service was not initialized (e.g. first-time config save) — build it now.
-                    let workspace_root = rt.workspace_root.clone();
-                    if let Ok(mut runtime_cfg) =
-                        AgentRuntimeConfig::load(Some(workspace_root), None)
-                    {
-                        if runtime_cfg.services.local_llm {
-                            runtime_cfg.provider = crate::agent::config::LlmProvider::LlamaCpp;
-                        }
-                        runtime_cfg.normalize_provider_defaults();
-                        if runtime_cfg.model.is_some() || runtime_cfg.services.local_llm {
-                            *guard = Some(Arc::new(AgentUiService::new(runtime_cfg)));
+                if !rt.use_external_agent {
+                    let mut guard = rt
+                        .agent_service
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("agent service mutex poisoned"))?;
+                    if let Some(service) = guard.as_ref() {
+                        // Service already exists — just reload config in place.
+                        service.reload_config();
+                    } else {
+                        // Service was not initialized (e.g. first-time config save) — build it now.
+                        let workspace_root = rt.workspace_root.clone();
+                        if let Ok(mut runtime_cfg) =
+                            AgentRuntimeConfig::load(Some(workspace_root), None)
+                        {
+                            if runtime_cfg.services.local_llm {
+                                runtime_cfg.provider = crate::agent::config::LlmProvider::LlamaCpp;
+                            }
+                            runtime_cfg.normalize_provider_defaults();
+                            if runtime_cfg.model.is_some() || runtime_cfg.services.local_llm {
+                                *guard = Some(Arc::new(AgentUiService::new(runtime_cfg)) as Arc<dyn ConversationBackend>);
+                            }
                         }
                     }
                 }
@@ -2428,7 +2459,7 @@ mod imp {
     pub extern "C" fn amadeus_native_llm_loading() -> i32 {
         let ready = native_ui_runtime()
             .and_then(|rt| rt.agent_service.lock().ok())
-            .and_then(|guard| guard.as_ref().map(|svc| svc.is_model_ready()))
+            .and_then(|guard| guard.as_ref().map(|svc| svc.is_ready()))
             .unwrap_or(true);
         i32::from(!ready)
     }

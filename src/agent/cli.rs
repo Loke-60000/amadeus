@@ -7,6 +7,7 @@ use crate::agent::{
     autonomy::AutonomyActivity,
     config::{AgentRuntimeConfig, LlmProvider, ShellSecurityMode},
     prompt::PromptComposer,
+    serve::{ServeOptions, run_serve},
     tools::ToolCatalog,
     workspace::AgentWorkspace,
 };
@@ -30,6 +31,7 @@ pub fn run_cli(args: &[String]) -> Result<()> {
                 app.run_interactive()
             }
         }
+        AgentCommand::Serve(runtime, options) => run_serve(runtime, options),
     }
 }
 
@@ -38,6 +40,7 @@ enum AgentCommand {
     Auto(AgentRuntimeConfig, AutoOptions),
     Init(AgentRuntimeConfig),
     Prompt(AgentRuntimeConfig),
+    Serve(AgentRuntimeConfig, ServeOptions),
     Help,
 }
 
@@ -56,6 +59,7 @@ fn parse_command(args: &[String]) -> Result<AgentCommand> {
     let mut api_base_explicit = false;
     let mut api_key_explicit = false;
     let mut auto_options = AutoOptions::default();
+    let mut serve_bind: Option<String> = None;
 
     if let Some(first) = args.first() {
         if !first.starts_with('-') {
@@ -153,6 +157,9 @@ fn parse_command(args: &[String]) -> Result<AgentCommand> {
                         .max(1),
                 );
             }
+            "--bind" => {
+                serve_bind = Some(next_value(args, &mut index, flag)?.to_string());
+            }
             other => bail!("unknown option {other:?}; run `cargo run -- agent --help`"),
         }
     }
@@ -170,6 +177,12 @@ fn parse_command(args: &[String]) -> Result<AgentCommand> {
         }
         "init" => Ok(AgentCommand::Init(runtime)),
         "prompt" => Ok(AgentCommand::Prompt(runtime)),
+        "serve" => Ok(AgentCommand::Serve(
+            runtime,
+            ServeOptions {
+                bind: serve_bind.unwrap_or_else(|| ServeOptions::default().bind),
+            },
+        )),
         "help" => Ok(AgentCommand::Help),
         other => bail!("unknown agent subcommand {other:?}"),
     }
@@ -229,6 +242,7 @@ fn option_takes_value(flag: &str) -> bool {
             | "--max-context-tokens"
             | "--max-tool-rounds"
             | "--cycles"
+            | "--bind"
     )
 }
 
@@ -328,7 +342,7 @@ fn next_value<'a>(args: &'a [String], index: &mut usize, flag: &str) -> Result<&
 
 fn print_help() {
     println!(
-        "Amadeus agent core\n\nUsage:\n  cargo run -- agent [chat] [options]\n  cargo run -- agent auto [options]\n  cargo run -- agent init [options]\n  cargo run -- agent prompt [options]\n\nOptions:\n  --workspace PATH         Workspace root (defaults to the current directory)\n  --config PATH            Load a JSON agent config (auto-loads .amadeus/config.json)\n  --session ID             Session id for transcript persistence (chat/auto)\n  --provider NAME          openai-chat | openai-responses | anthropic | gemini | ollama\n  --model MODEL            Provider-specific model id\n  --api-base URL           Override the provider base URL\n  --api-key VALUE          Optional API key for the selected provider\n  --prompt TEXT            Run one turn non-interactively and exit (chat only)\n  --security MODE          ask | allowlist | full\n  --allow-bin NAME         Add a baseline-approved executable\n  --allow-shell            Permit shell snippets when policy allows them\n  --temperature FLOAT      Sampling temperature (default 0.2)\n  --max-output-tokens N    Provider output token cap (default 2048)\n  --max-context-tokens N   Approximate session-context budget before compaction (default 16000)\n  --max-tool-rounds N      Tool-call loop cap (default 8)\n  --daemon                 Keep autonomous mode running until interrupted\n  --cycles N               Run N autonomous cycles before exiting (auto only)\n\nEnvironment:\n  AMADEUS_AGENT_PROVIDER\n  AMADEUS_AGENT_MODEL\n  AMADEUS_AGENT_API_BASE\n  AMADEUS_AGENT_API_KEY\n  AMADEUS_AGENT_MAX_OUTPUT_TOKENS\n  AMADEUS_AGENT_MAX_CONTEXT_TOKENS\n  AMADEUS_AGENT_SECURITY\n  AMADEUS_AGENT_ALLOW_SHELL\n  AMADEUS_AGENT_ALLOWED_BINS\n  AMADEUS_AGENT_AUTONOMY\n  AMADEUS_AGENT_AUTONOMY_AUTO_START\n  AMADEUS_AGENT_AUTONOMY_INTERVAL\n  AMADEUS_AGENT_AUTONOMY_IDLE_BACKOFF\n  AMADEUS_AGENT_AUTONOMY_RESEARCH\n  AMADEUS_AGENT_AUTONOMY_RESEARCH_ABSENT_USER_MINS\n  AMADEUS_AGENT_AUTONOMY_RESEARCH_MAX_PENDING_NOTES\n  AMADEUS_AGENT_AUTONOMY_RESEARCH_TOPICS\n\nExamples:\n  cargo run -- agent init\n  cargo run -- agent chat --config .amadeus/config.json\n  cargo run -- agent auto --cycles 2\n  cargo run -- agent auto --daemon\n  cargo run -- agent chat --provider openai-chat --model gpt-4.1-mini\n  cargo run -- agent chat --provider openai-responses --model gpt-4.1\n  cargo run -- agent chat --provider anthropic --model claude-sonnet-4-20250514\n  cargo run -- agent chat --provider gemini --model gemini-2.5-pro\n  cargo run -- agent chat --provider ollama --model qwen2.5-coder --api-base http://localhost:11434\n  cargo run -- agent prompt --workspace ."
+        "Amadeus agent core\n\nUsage:\n  cargo run -- agent [chat] [options]\n  cargo run -- agent auto [options]\n  cargo run -- agent init [options]\n  cargo run -- agent prompt [options]\n  cargo run -- agent serve [--bind ADDR]\n\nOptions:\n  --workspace PATH         Workspace root (defaults to the current directory)\n  --config PATH            Load a JSON agent config (auto-loads .amadeus/config.json)\n  --session ID             Session id for transcript persistence (chat/auto)\n  --provider NAME          openai-chat | openai-responses | anthropic | gemini | ollama\n  --model MODEL            Provider-specific model id\n  --api-base URL           Override the provider base URL\n  --api-key VALUE          Optional API key for the selected provider\n  --prompt TEXT            Run one turn non-interactively and exit (chat only)\n  --security MODE          ask | allowlist | full\n  --allow-bin NAME         Add a baseline-approved executable\n  --allow-shell            Permit shell snippets when policy allows them\n  --temperature FLOAT      Sampling temperature (default 0.2)\n  --max-output-tokens N    Provider output token cap (default 2048)\n  --max-context-tokens N   Approximate session-context budget before compaction (default 16000)\n  --max-tool-rounds N      Tool-call loop cap (default 8)\n  --daemon                 Keep autonomous mode running until interrupted\n  --cycles N               Run N autonomous cycles before exiting (auto only)\n  --bind ADDR              Address to listen on for `serve` (default 127.0.0.1:8765)\n\nEnvironment:\n  AMADEUS_AGENT_PROVIDER\n  AMADEUS_AGENT_MODEL\n  AMADEUS_AGENT_API_BASE\n  AMADEUS_AGENT_API_KEY\n  AMADEUS_AGENT_MAX_OUTPUT_TOKENS\n  AMADEUS_AGENT_MAX_CONTEXT_TOKENS\n  AMADEUS_AGENT_SECURITY\n  AMADEUS_AGENT_ALLOW_SHELL\n  AMADEUS_AGENT_ALLOWED_BINS\n  AMADEUS_AGENT_AUTONOMY\n  AMADEUS_AGENT_AUTONOMY_AUTO_START\n  AMADEUS_AGENT_AUTONOMY_INTERVAL\n  AMADEUS_AGENT_AUTONOMY_IDLE_BACKOFF\n  AMADEUS_AGENT_AUTONOMY_RESEARCH\n  AMADEUS_AGENT_AUTONOMY_RESEARCH_ABSENT_USER_MINS\n  AMADEUS_AGENT_AUTONOMY_RESEARCH_MAX_PENDING_NOTES\n  AMADEUS_AGENT_AUTONOMY_RESEARCH_TOPICS\n  AMADEUS_SERVE_KEY        Bearer token required by the `serve` endpoint (optional)\n  AMADEUS_EXTERNAL_AGENT_URL  Point the native viewer at a remote `serve` instance\n  AMADEUS_EXTERNAL_AGENT_KEY  Bearer token sent to the remote agent server\n\nExamples:\n  cargo run -- agent init\n  cargo run -- agent chat --config .amadeus/config.json\n  cargo run -- agent auto --cycles 2\n  cargo run -- agent auto --daemon\n  cargo run -- agent serve --bind 0.0.0.0:8765\n  AMADEUS_EXTERNAL_AGENT_URL=http://host:8765 cargo run\n  cargo run -- agent chat --provider openai-chat --model gpt-4.1-mini\n  cargo run -- agent chat --provider openai-responses --model gpt-4.1\n  cargo run -- agent chat --provider anthropic --model claude-sonnet-4-20250514\n  cargo run -- agent chat --provider gemini --model gemini-2.5-pro\n  cargo run -- agent chat --provider ollama --model qwen2.5-coder --api-base http://localhost:11434\n  cargo run -- agent prompt --workspace ."
     );
 }
 

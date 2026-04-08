@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::agent::{
     app::AgentApp,
     autonomy::AutonomyActivity,
+    backend::{ConversationBackend, TurnRequest, TurnResponse},
     config::AgentRuntimeConfig,
     llm::{build_model_client, ModelClient, TextStreamSink},
     session::{AgentSession, SessionMessage, SessionRole, SessionVisibility},
@@ -409,6 +410,47 @@ fn sleep_interruptibly(stop: &AtomicBool, seconds: u64) -> bool {
         thread::sleep(Duration::from_secs(1));
     }
     !stop.load(Ordering::Relaxed)
+}
+
+// ── ConversationBackend impl ──────────────────────────────────────────────────
+
+impl ConversationBackend for AgentUiService {
+    fn is_ready(&self) -> bool {
+        AgentUiService::is_model_ready(self)
+    }
+
+    fn reload_config(&self) {
+        AgentUiService::reload_config(self);
+    }
+
+    fn run_turn(&self, request: TurnRequest) -> anyhow::Result<TurnResponse> {
+        let resp = AgentUiService::run_turn(
+            self,
+            AgentUiTurnRequest {
+                prompt: request.prompt,
+                session_id: request.session_id,
+                voice_mode: request.voice_mode,
+            },
+        )?;
+        Ok(TurnResponse { reply: resp.reply })
+    }
+
+    fn run_turn_streaming(
+        &self,
+        request: TurnRequest,
+        sink: &mut dyn TextStreamSink,
+    ) -> anyhow::Result<TurnResponse> {
+        let resp = AgentUiService::run_turn_streaming(
+            self,
+            AgentUiTurnRequest {
+                prompt: request.prompt,
+                session_id: request.session_id,
+                voice_mode: request.voice_mode,
+            },
+            sink,
+        )?;
+        Ok(TurnResponse { reply: resp.reply })
+    }
 }
 
 #[cfg(test)]
