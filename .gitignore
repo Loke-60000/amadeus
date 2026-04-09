@@ -12,3 +12,12 @@
 # Model files
 assets/models/**/*.bin
 assets/models/**/*.gguf
+
+# Android build artifacts
+android/.gradle/
+android/app/.cxx/
+android/app/build/
+android/local.properties
+
+# Android synced model assets (copied from assets/model at build time)
+android/app/src/main/assets/model/

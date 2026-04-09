@@ -3,5 +3,6 @@ members  = [
     "crates/amadeus-backend",
     "crates/amadeus-client",
     "crates/amadeus-desktop",
+    "crates/amadeus-android",
 ]
 resolver = "2"

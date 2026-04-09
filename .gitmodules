@@ -4,3 +4,6 @@
 [submodule "third_party/llama.cpp"]
 	path = third_party/llama.cpp
 	url = https://github.com/ggml-org/llama.cpp.git
+[submodule "third_party/CubismSdkForAndroid"]
+	path = third_party/CubismSdkForAndroid
+	url = https://github.com/Live2D/CubismSdkForAndroid.git

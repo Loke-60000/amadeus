@@ -1,0 +1,35 @@
+[package]
+name = "amadeus-android"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[features]
+default        = ["stt-vulkan"]
+cuda           = ["amadeus-client/cuda"]
+flash-attn     = ["amadeus-client/flash-attn"]
+metal          = ["amadeus-client/metal"]
+mkl            = ["amadeus-client/mkl"]
+accelerate     = ["amadeus-client/accelerate"]
+stt-vulkan     = ["amadeus-client/stt-vulkan"]
+stt-cuda       = ["amadeus-client/stt-cuda"]
+
+[dependencies]
+amadeus-client  = { path = "../amadeus-client" }
+amadeus-backend = { path = "../amadeus-backend" }
+anyhow          = "1.0"
+log             = "0.4"
+android_logger  = "0.14"
+android-activity = { version = "0.6", features = ["native-activity"] }
+ndk             = { version = "0.9", features = ["all"] }
+ndk-context     = "0.1"
+jni             = { version = "0.21", default-features = false }
+hound           = "3.5"
+
+[build-dependencies]
+cc  = "1.1"
+
+[target.'cfg(target_os = "android")'.dependencies]
+libc = "0.2"
