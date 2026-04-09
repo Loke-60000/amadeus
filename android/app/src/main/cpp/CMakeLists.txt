@@ -11,7 +11,11 @@ set(CUBISM_CORE_DIR "$ENV{AMADEUS_CUBISM_CORE_DIR}"
     CACHE PATH "Path to Cubism Core (Core/ from SDK download)")
 
 if(NOT CUBISM_CORE_DIR)
-    set(CUBISM_CORE_DIR "${WORKSPACE_ROOT}/ressource/CubismSdkForNative-5-r.4.1/Core")
+    if(EXISTS "${WORKSPACE_ROOT}/android/cubism-core/lib/android")
+        set(CUBISM_CORE_DIR "${WORKSPACE_ROOT}/android/cubism-core")
+    else()
+        set(CUBISM_CORE_DIR "${WORKSPACE_ROOT}/ressource/CubismSdkForNative-5-r.4.1/Core")
+    endif()
 endif()
 
 set(CORE_LIB "${CUBISM_CORE_DIR}/lib/android/${ANDROID_ABI}/libLive2DCubismCore.a")

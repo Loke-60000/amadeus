@@ -71,19 +71,6 @@ jobs:
         with:
           key: android
 
-      - name: Restore Cubism Core
-        # Secret CUBISM_CORE_ANDROID_B64: base64-encoded tarball of the proprietary Core/ directory.
-        # Generate with:
-        #   tar -cz -C ressource/CubismSdkForNative-5-r.4.1/Core include lib/android | base64 -w 0
-        # Add the output as a GitHub repo/org secret named CUBISM_CORE_ANDROID_B64.
-        if: ${{ env.CUBISM_CORE_ANDROID_B64 != '' }}
-        env:
-          CUBISM_CORE_ANDROID_B64: ${{ secrets.CUBISM_CORE_ANDROID_B64 }}
-        run: |
-          mkdir -p "${{ github.workspace }}/cubism-core"
-          echo "$CUBISM_CORE_ANDROID_B64" | base64 -d | tar -xz -C "${{ github.workspace }}/cubism-core"
-          echo "AMADEUS_CUBISM_CORE_DIR=${{ github.workspace }}/cubism-core" >> "$GITHUB_ENV"
-
       - name: Write local.properties
         run: |
           echo "sdk.dir=$ANDROID_SDK_ROOT" > android/local.properties
