@@ -76,7 +76,7 @@ jobs:
         # Generate with:
         #   tar -cz -C ressource/CubismSdkForNative-5-r.4.1/Core include lib/android | base64 -w 0
         # Add the output as a GitHub repo/org secret named CUBISM_CORE_ANDROID_B64.
-        if: ${{ secrets.CUBISM_CORE_ANDROID_B64 != '' }}
+        if: ${{ env.CUBISM_CORE_ANDROID_B64 != '' }}
         env:
           CUBISM_CORE_ANDROID_B64: ${{ secrets.CUBISM_CORE_ANDROID_B64 }}
         run: |
