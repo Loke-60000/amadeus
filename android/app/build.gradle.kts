@@ -5,6 +5,7 @@ plugins {
 android {
     namespace = "dev.amadeus.app"
     compileSdk = 35
+    ndkVersion = "26.3.11579264"
 
     defaultConfig {
         applicationId = "dev.amadeus.app"
