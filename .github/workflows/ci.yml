@@ -76,11 +76,11 @@ jobs:
           echo "sdk.dir=$ANDROID_SDK_ROOT" > android/local.properties
           echo "ndk.dir=$ANDROID_SDK_ROOT/ndk/${{ env.NDK_VERSION }}" >> android/local.properties
 
-      - name: Override cargo NDK linker paths for CI
+      - name: Write cargo config for Android cross-compilation
         run: |
           NDK_TC="$ANDROID_SDK_ROOT/ndk/${{ env.NDK_VERSION }}/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          cat >> .cargo/config.toml <<EOF
-
+          mkdir -p .cargo
+          cat > .cargo/config.toml <<EOF
           [target.aarch64-linux-android]
           linker = "$NDK_TC/aarch64-linux-android26-clang"
           ar     = "$NDK_TC/llvm-ar"
